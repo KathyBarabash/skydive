@@ -146,3 +146,80 @@ class SkydiveWSTest(unittest.TestCase):
         edges = restclient.lookup_edges(
             "G.E().Has('RelationType', 'layer2')")
         self.assertEqual(len(edges), 1, "should find one an only one edge")
+
+    def test_capture(self):
+        restclient = RESTClient("localhost:8082",
+                                scheme=self.schemeHTTP,
+                                username=self.username,
+                                password=self.password,
+                                insecure=True)
+
+        capture1 = restclient.capture_create(
+            "G.V().Has('Name', 'test', 'Type', 'netns')")
+
+        captures = restclient.capture_list()
+        self.assertGreaterEqual(len(captures), 1, "no capture found")
+
+        for capture in captures:
+            if (capture.uuid == capture1.uuid):
+                found = True
+                break
+        self.assertTrue(found, "created capture not found")
+
+        restclient.capture_delete(capture1.uuid)
+
+    def test_alert(self):
+        restclient = RESTClient("localhost:8082",
+                                scheme=self.schemeHTTP,
+                                username=self.username,
+                                password=self.password,
+                                insecure=True)
+
+        alert1 = restclient.alert_create(
+            "https://localhost:8081",
+            "G.V().Has('Name', 'alert-ns-webhook', 'Type', 'netns')")
+
+        alerts = restclient.alert_list()
+        self.assertGreaterEqual(len(alerts), 1, "no alerts found")
+        for alert in alerts:
+            if (alert.uuid == alert1.uuid):
+                found = True
+                break
+
+        self.assertTrue(found, "created alert not found")
+
+        restclient.alert_delete(alert1.uuid)
+
+    def test_topology_rules(self):
+        restclient = RESTClient("localhost:8082",
+                                scheme=self.schemeHTTP,
+                                username=self.username,
+                                password=self.password,
+                                insecure=True)
+
+        noderule1 = restclient.noderule_create(
+            "create", metadata={"Name": "node1", "Type": "fabric"})
+        noderule2 = restclient.noderule_create(
+            "create", metadata={"Name": "node2", "Type": "fabric"})
+
+        time.sleep(1)
+
+        edgerule = restclient.edgerule_create(
+                "G.V().Has('Name', 'node1')", "G.V().Has('Name', 'node2')",
+                {"RelationType": "layer2", "EdgeName": "my_edge"})
+
+        time.sleep(1)
+
+        node1 = restclient.lookup_nodes("G.V().Has('Name', 'node1')")
+        self.assertEqual(len(node1), 1, "should find only one node as node1")
+
+        node2 = restclient.lookup_nodes("G.V().Has('Name', 'node2')")
+        self.assertEqual(len(node2), 1, "should find only one node as node2")
+
+        edge = restclient.lookup_edges(
+                "G.E().Has('RelationType', 'layer2', 'EdgeName', 'my_edge')")
+        self.assertEqual(len(edge), 1, "should find only one edge")
+
+        restclient.edgerule_delete(edgerule.uuid)
+        restclient.noderule_delete(noderule1.uuid)
+        restclient.noderule_delete(noderule2.uuid)

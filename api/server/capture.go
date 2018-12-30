@@ -28,9 +28,10 @@ import (
 	"github.com/skydive-project/skydive/api/types"
 	"github.com/skydive-project/skydive/common"
 	"github.com/skydive-project/skydive/flow"
+	"github.com/skydive-project/skydive/graffiti/graph"
 	ge "github.com/skydive-project/skydive/gremlin/traversal"
+	shttp "github.com/skydive-project/skydive/http"
 	"github.com/skydive-project/skydive/logging"
-	"github.com/skydive-project/skydive/topology/graph"
 )
 
 // CaptureResourceHandler describes a capture ressouce handler
@@ -68,7 +69,7 @@ func (c *CaptureAPIHandler) Decorate(resource types.Resource) {
 
 	res, err := ge.TopologyGremlinQuery(c.Graph, capture.GremlinQuery)
 	if err != nil {
-		logging.GetLogger().Errorf("Gremlin error: %s", err.Error())
+		logging.GetLogger().Errorf("Gremlin error: %s", err)
 		return
 	}
 
@@ -76,7 +77,7 @@ func (c *CaptureAPIHandler) Decorate(resource types.Resource) {
 		switch value.(type) {
 		case *graph.Node:
 			n := value.(*graph.Node)
-			if cuuid, _ := n.GetFieldString("Capture.ID"); cuuid != "" {
+			if state, _ := n.GetFieldString("Capture.State"); state == "active" {
 				count++
 			}
 			if p, _ := n.GetFieldString("Capture.PCAPSocket"); p != "" {
@@ -135,7 +136,7 @@ func (c *CaptureAPIHandler) Create(r types.Resource) error {
 }
 
 // RegisterCaptureAPI registers an new resource, capture
-func RegisterCaptureAPI(apiServer *Server, g *graph.Graph) (*CaptureAPIHandler, error) {
+func RegisterCaptureAPI(apiServer *Server, g *graph.Graph, authBackend shttp.AuthenticationBackend) (*CaptureAPIHandler, error) {
 	captureAPIHandler := &CaptureAPIHandler{
 		BasicAPIHandler: BasicAPIHandler{
 			ResourceHandler: &CaptureResourceHandler{},
@@ -143,7 +144,7 @@ func RegisterCaptureAPI(apiServer *Server, g *graph.Graph) (*CaptureAPIHandler, 
 		},
 		Graph: g,
 	}
-	if err := apiServer.RegisterAPIHandler(captureAPIHandler); err != nil {
+	if err := apiServer.RegisterAPIHandler(captureAPIHandler, authBackend); err != nil {
 		return nil, err
 	}
 	return captureAPIHandler, nil

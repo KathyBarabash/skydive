@@ -25,82 +25,36 @@ package k8s
 import (
 	"fmt"
 
-	"github.com/skydive-project/skydive/logging"
-	"github.com/skydive-project/skydive/probe"
-	"github.com/skydive-project/skydive/topology/graph"
+	"github.com/skydive-project/skydive/graffiti/graph"
 
 	"k8s.io/api/core/v1"
-	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/kubernetes"
 )
 
-type persistentVolumeProbe struct {
-	defaultKubeCacheEventHandler
-	*kubeCache
-	graph *graph.Graph
+type persistentVolumeHandler struct {
 }
 
-func dumpPersistentVolume(pv *v1.PersistentVolume) string {
-	return fmt.Sprintf("persistentvolume{Name: %s}", pv.GetName())
+func (h *persistentVolumeHandler) Dump(obj interface{}) string {
+	pv := obj.(*v1.PersistentVolume)
+	return fmt.Sprintf("persistentvolume{Name: %s}", pv.Name)
 }
 
-func (p *persistentVolumeProbe) newMetadata(pv *v1.PersistentVolume) graph.Metadata {
-	return newMetadata("persistentvolume", pv.Namespace, pv.GetName(), pv)
-}
+func (h *persistentVolumeHandler) Map(obj interface{}) (graph.Identifier, graph.Metadata) {
+	pv := obj.(*v1.PersistentVolume)
 
-func persistentVolumeUID(pv *v1.PersistentVolume) graph.Identifier {
-	return graph.Identifier(pv.GetUID())
-}
-
-func (p *persistentVolumeProbe) OnAdd(obj interface{}) {
-	if pv, ok := obj.(*v1.PersistentVolume); ok {
-		p.graph.Lock()
-		defer p.graph.Unlock()
-
-		newNode(p.graph, persistentVolumeUID(pv), p.newMetadata(pv))
-		logging.GetLogger().Debugf("Added %s", dumpPersistentVolume(pv))
+	m := NewMetadataFields(&pv.ObjectMeta)
+	m.SetFieldAndNormalize("Capacity", pv.Spec.Capacity)
+	m.SetFieldAndNormalize("VolumeMode", pv.Spec.VolumeMode)
+	m.SetFieldAndNormalize("StorageClassName", pv.Spec.StorageClassName) // FIXME: replace by link to StorageClass
+	m.SetFieldAndNormalize("Status", pv.Status.Phase)
+	m.SetFieldAndNormalize("AccessModes", pv.Spec.AccessModes)
+	if pv.Spec.ClaimRef != nil {
+		m.SetFieldAndNormalize("ClaimRef", pv.Spec.ClaimRef.Name) // FIXME: replace by link to PersistentVolumeClaim
 	}
+
+	return graph.Identifier(pv.GetUID()), NewMetadata(Manager, "persistentvolume", m, pv, pv.Name)
 }
 
-func (p *persistentVolumeProbe) OnUpdate(oldObj, newObj interface{}) {
-	if pv, ok := newObj.(*v1.PersistentVolume); ok {
-		p.graph.Lock()
-		defer p.graph.Unlock()
-
-		if node := p.graph.GetNode(persistentVolumeUID(pv)); node != nil {
-			addMetadata(p.graph, node, pv)
-			logging.GetLogger().Debugf("Updated %s", dumpPersistentVolume(pv))
-		}
-	}
-}
-
-func (p *persistentVolumeProbe) OnDelete(obj interface{}) {
-	if pv, ok := obj.(*v1.PersistentVolume); ok {
-		p.graph.Lock()
-		defer p.graph.Unlock()
-
-		if node := p.graph.GetNode(persistentVolumeUID(pv)); node != nil {
-			p.graph.DelNode(node)
-			logging.GetLogger().Debugf("Deleted %s", dumpPersistentVolume(pv))
-		}
-	}
-}
-
-func (p *persistentVolumeProbe) Start() {
-	p.kubeCache.Start()
-}
-
-func (p *persistentVolumeProbe) Stop() {
-	p.kubeCache.Stop()
-}
-
-func newPersistentVolumeKubeCache(handler cache.ResourceEventHandler) *kubeCache {
-	return newKubeCache(getClientset().CoreV1().RESTClient(), &v1.PersistentVolume{}, "persistentvolumes", handler)
-}
-
-func newPersistentVolumeProbe(g *graph.Graph) probe.Probe {
-	p := &persistentVolumeProbe{
-		graph: g,
-	}
-	p.kubeCache = newPersistentVolumeKubeCache(p)
-	return p
+func newPersistentVolumeProbe(client interface{}, g *graph.Graph) Subprobe {
+	return NewResourceCache(client.(*kubernetes.Clientset).CoreV1().RESTClient(), &v1.PersistentVolume{}, "persistentvolumes", g, &persistentVolumeHandler{})
 }

@@ -25,9 +25,9 @@ package traversal
 import (
 	"fmt"
 
+	"github.com/skydive-project/skydive/graffiti/graph"
+	"github.com/skydive-project/skydive/graffiti/graph/traversal"
 	"github.com/skydive-project/skydive/topology"
-	"github.com/skydive-project/skydive/topology/graph"
-	"github.com/skydive-project/skydive/topology/graph/traversal"
 )
 
 // DescendantsTraversalExtension describes a new extension to enhance the topology
@@ -95,7 +95,7 @@ func getDescendants(g *graph.Graph, parents []*graph.Node, descendants *[]*graph
 
 	if maxDepth == 0 || currDepth < maxDepth {
 		for _, parent := range parents {
-			children := g.LookupChildren(parent, nil, topology.OwnershipMetadata)
+			children := g.LookupChildren(parent, nil, topology.OwnershipMetadata())
 			getDescendants(g, children, descendants, currDepth+1, maxDepth, visited)
 		}
 	}
@@ -117,8 +117,8 @@ func (d *DescendantsGremlinTraversalStep) Exec(last traversal.GraphTraversalStep
 }
 
 // Reduce Descendants step
-func (d *DescendantsGremlinTraversalStep) Reduce(next traversal.GremlinTraversalStep) traversal.GremlinTraversalStep {
-	return next
+func (d *DescendantsGremlinTraversalStep) Reduce(next traversal.GremlinTraversalStep) (traversal.GremlinTraversalStep, error) {
+	return next, nil
 }
 
 // Context Descendants step

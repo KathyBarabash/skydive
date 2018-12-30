@@ -28,6 +28,7 @@ import (
 	"gopkg.in/yaml.v2"
 
 	"github.com/skydive-project/skydive/api/types"
+	shttp "github.com/skydive-project/skydive/http"
 	"github.com/skydive-project/skydive/logging"
 	"github.com/skydive-project/skydive/statics"
 )
@@ -80,6 +81,7 @@ func (w *WorkflowAPIHandler) loadWorkflowAsset(name string) (*types.Workflow, er
 	return &workflow, nil
 }
 
+// Get retrieves a workflow based on its id
 func (w *WorkflowAPIHandler) Get(id string) (types.Resource, bool) {
 	workflows := w.Index()
 	workflow, found := workflows[id]
@@ -89,6 +91,7 @@ func (w *WorkflowAPIHandler) Get(id string) (types.Resource, bool) {
 	return workflow.(*types.Workflow), true
 }
 
+// Index returns a map of workflows indexed by id
 func (w *WorkflowAPIHandler) Index() map[string]types.Resource {
 	resources := w.BasicAPIHandler.Index()
 	assets, err := statics.AssetDir(workflowAssetDir)
@@ -106,14 +109,14 @@ func (w *WorkflowAPIHandler) Index() map[string]types.Resource {
 }
 
 // RegisterWorkflowAPI registers a new workflow api handler
-func RegisterWorkflowAPI(apiServer *Server) (*WorkflowAPIHandler, error) {
+func RegisterWorkflowAPI(apiServer *Server, authBackend shttp.AuthenticationBackend) (*WorkflowAPIHandler, error) {
 	workflowAPIHandler := &WorkflowAPIHandler{
 		BasicAPIHandler: BasicAPIHandler{
 			ResourceHandler: &WorkflowResourceHandler{},
 			EtcdKeyAPI:      apiServer.EtcdKeyAPI,
 		},
 	}
-	if err := apiServer.RegisterAPIHandler(workflowAPIHandler); err != nil {
+	if err := apiServer.RegisterAPIHandler(workflowAPIHandler, authBackend); err != nil {
 		return nil, err
 	}
 	return workflowAPIHandler, nil

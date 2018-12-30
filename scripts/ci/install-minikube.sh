@@ -6,13 +6,13 @@ OS=linux
 ARCH=amd64
 TARGET_DIR=/usr/bin
 
-MINIKUBE_VERSION="v0.25.2"
+MINIKUBE_VERSION="v0.28.2"
 MINIKUBE_URL="https://github.com/kubernetes/minikube/releases/download/$MINIKUBE_VERSION/minikube-$OS-$ARCH"
 
-KUBECTL_VERSION="v1.9.4"
-KUBECTL_URL="https://storage.googleapis.com/kubernetes-release/release/$KUBECTL_VERSION/bin/$OS/$ARCH/kubectl"
+K8S_VERSION="v1.10.0"
+KUBECTL_URL="https://storage.googleapis.com/kubernetes-release/release/$K8S_VERSION/bin/$OS/$ARCH/kubectl"
 
-WITH_CALICO=true
+WITH_CALICO=false
 
 CALICO_SITE="https://docs.projectcalico.org"
 CALICO_VER="v1.5"
@@ -79,7 +79,7 @@ uninstall() {
 stop() {
         check_minikube
 
-        minikube delete
+        minikube delete || true
         sudo rm -rf $HOME/.minikube $HOME/.kube
         sudo rm -rf /root/.minikube /root/.kube
 
@@ -87,22 +87,23 @@ stop() {
                 sudo rm -rf /etc/kubernetes
                 sudo rm -rf /var/lib/localkube
 
-                sudo docker system prune -af
-                for i in $(sudo docker ps -aq --filter name=k8s); do
-                        sudo docker stop $i
-                        sudo docker rm $i
+                sudo docker system prune -af || true
+                for i in $(sudo docker ps -aq --filter name=k8s || true); do
+                        sudo docker stop $i || true
+                        sudo docker rm $i || true
                 done
 
-                sudo systemctl stop localkube
-                sudo systemctl disable localkube
+                sudo systemctl stop localkube || true
+                sudo systemctl disable localkube || true
         fi
 }
 
 start() {
         check_minikube
 
+        local args="--kubernetes-version $K8S_VERSION --memory 4096"
         if [ "$MINIKUBE_DRIVER" == "none" ]; then
-                local args="--vm-driver=none"
+                args="$args --vm-driver=none --bootstrapper=localkube"
                 local driver=$(sudo docker info --format '{{print .CgroupDriver}}')
                 if [ -n "$driver" ]; then
                         args="$args --extra-config=kubelet.CgroupDriver=$driver"
@@ -113,9 +114,17 @@ start() {
                 args="$args --network-plugin=cni --host-only-cidr=20.0.0.0/16"
         fi
 
-        minikube start $args
+	# FIXME: using '|| true' to overcome following:
+        # FIXME: Error cluster status: getting status: running command: sudo systemctl is-active kubelet
+        echo "Starting minikube with minikube start $args"
+        minikube start $args || true
+
+        echo "Give minikube time to come up"
+        sleep 5
+
+        echo "Get minikube status"
         minikube status
-        export no_proxy=$no_proxy,$(minikube ip)
+
         kubectl config use-context minikube
 
         for i in .kube .minikube; do

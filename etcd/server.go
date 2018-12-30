@@ -37,25 +37,22 @@ import (
 	"github.com/coreos/etcd/pkg/types"
 
 	"github.com/skydive-project/skydive/common"
-	"github.com/skydive-project/skydive/config"
 	"github.com/skydive-project/skydive/logging"
 )
 
 const (
-	memberName   = "skydive"
 	startTimeout = 10 * time.Second
 )
 
 // EmbeddedEtcd provides a single node etcd server.
 type EmbeddedEtcd struct {
-	Port    int
-	config  *embed.Config
-	etcd    *embed.Etcd
-	dataDir string
+	Port   int
+	config *embed.Config
+	etcd   *embed.Etcd
 }
 
 // NewEmbeddedEtcd creates a new embedded ETCD server
-func NewEmbeddedEtcd(name string, listen string, dataDir string, maxWalFiles, maxSnapFiles uint, debug bool) (*EmbeddedEtcd, error) {
+func NewEmbeddedEtcd(name string, listen string, peers map[string]string, dataDir string, maxWalFiles, maxSnapFiles uint, debug bool) (*EmbeddedEtcd, error) {
 	sa, err := common.ServiceAddressFromString(listen)
 	if err != nil {
 		return nil, err
@@ -88,7 +85,6 @@ func NewEmbeddedEtcd(name string, listen string, dataDir string, maxWalFiles, ma
 	cfg.ACUrls = listenClientURLs // This probably won't work with proxy feature
 
 	var advertisePeerUrls types.URLs
-	peers := config.GetStringMapString("etcd.peers")
 	if len(peers) != 0 {
 		initialPeers, err := types.NewURLsMapFromStringMap(peers, ",")
 		if err != nil {
@@ -153,17 +149,6 @@ func NewEmbeddedEtcd(name string, listen string, dataDir string, maxWalFiles, ma
 		config: cfg,
 		etcd:   etcd,
 	}, nil
-}
-
-// NewEmbeddedEtcdFromConfig creates a new embedded ETCD server from configuration
-func NewEmbeddedEtcdFromConfig() (*EmbeddedEtcd, error) {
-	name := config.GetString("etcd.name")
-	dataDir := config.GetString("etcd.data_dir")
-	listen := config.GetString("etcd.listen")
-	maxWalFiles := uint(config.GetInt("etcd.max_wal_files"))
-	maxSnapFiles := uint(config.GetInt("etcd.max_snap_files"))
-	debug := config.GetBool("etcd.debug")
-	return NewEmbeddedEtcd(name, listen, dataDir, maxWalFiles, maxSnapFiles, debug)
 }
 
 // Stop the embedded server

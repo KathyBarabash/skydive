@@ -40,7 +40,7 @@ class GraphElement(object):
         obj = {
             "ID": self.id,
             "Host": self.host,
-            "Metadata": self.metadata
+            "Metadata": self.metadata,
         }
         if self.created_at:
             obj["CreatedAt"] = self.created_at

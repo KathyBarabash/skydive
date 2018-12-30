@@ -28,7 +28,7 @@ import (
 	"fmt"
 
 	"github.com/skydive-project/skydive/common"
-	"github.com/skydive-project/skydive/topology/graph/traversal"
+	"github.com/skydive-project/skydive/graffiti/graph/traversal"
 )
 
 const (
@@ -42,7 +42,7 @@ type MetricsTraversalExtension struct {
 
 // MetricsGremlinTraversalStep describes the Metrics gremlin traversal step
 type MetricsGremlinTraversalStep struct {
-	context traversal.GremlinTraversalContext
+	traversal.GremlinTraversalContext
 }
 
 // NewMetricsTraversalExtension returns a new graph traversal extension
@@ -65,7 +65,7 @@ func (e *MetricsTraversalExtension) ScanIdent(s string) (traversal.Token, bool) 
 func (e *MetricsTraversalExtension) ParseStep(t traversal.Token, p traversal.GremlinTraversalContext) (traversal.GremlinTraversalStep, error) {
 	switch t {
 	case e.MetricsToken:
-		return &MetricsGremlinTraversalStep{context: p}, nil
+		return &MetricsGremlinTraversalStep{GremlinTraversalContext: p}, nil
 	}
 	return nil, nil
 }
@@ -74,21 +74,21 @@ func (e *MetricsTraversalExtension) ParseStep(t traversal.Token, p traversal.Gre
 func (s *MetricsGremlinTraversalStep) Exec(last traversal.GraphTraversalStep) (traversal.GraphTraversalStep, error) {
 	switch tv := last.(type) {
 	case *traversal.GraphTraversalV:
-		return InterfaceMetrics(tv), nil
+		return InterfaceMetrics(s.StepContext, tv), nil
 	case *FlowTraversalStep:
-		return tv.FlowMetrics(), nil
+		return tv.FlowMetrics(s.StepContext), nil
 	}
 	return nil, traversal.ErrExecutionError
 }
 
 // Reduce metrics step
-func (s *MetricsGremlinTraversalStep) Reduce(next traversal.GremlinTraversalStep) traversal.GremlinTraversalStep {
-	return next
+func (s *MetricsGremlinTraversalStep) Reduce(next traversal.GremlinTraversalStep) (traversal.GremlinTraversalStep, error) {
+	return next, nil
 }
 
 // Context metrics step
 func (s *MetricsGremlinTraversalStep) Context() *traversal.GremlinTraversalContext {
-	return &s.context
+	return &s.GremlinTraversalContext
 }
 
 // MetricsTraversalStep traversal step metric interface counters
@@ -99,7 +99,7 @@ type MetricsTraversalStep struct {
 }
 
 // Sum aggregates integer values mapped by 'key' cross flows
-func (m *MetricsTraversalStep) Sum(keys ...interface{}) *traversal.GraphTraversalValue {
+func (m *MetricsTraversalStep) Sum(ctx traversal.StepContext, keys ...interface{}) *traversal.GraphTraversalValue {
 	if m.error != nil {
 		return traversal.NewGraphTraversalValueFromError(m.error)
 	}
@@ -206,7 +206,7 @@ func aggregateMetrics(m []common.Metric, start, last int64, sliceLength int64, r
 
 // Aggregates merges multiple metrics array into one by summing overlapping
 // metrics. It returns a unique array will all the aggregated metrics.
-func (m *MetricsTraversalStep) Aggregates(s ...interface{}) *MetricsTraversalStep {
+func (m *MetricsTraversalStep) Aggregates(ctx traversal.StepContext, s ...interface{}) *MetricsTraversalStep {
 	if m.error != nil {
 		return NewMetricsTraversalStepFromError(m.error)
 	}
@@ -222,8 +222,23 @@ func (m *MetricsTraversalStep) Aggregates(s ...interface{}) *MetricsTraversalSte
 
 	context := m.GraphTraversal.Graph.GetContext()
 
-	start := context.TimeSlice.Start
-	last := context.TimeSlice.Last
+	var start, last int64
+	if context.TimeSlice != nil {
+		start, last = context.TimeSlice.Start, context.TimeSlice.Last
+	} else {
+		// no time context then take min/max of the metrics
+		for _, array := range m.metrics {
+			for _, metric := range array {
+				if start == 0 || start > metric.GetStart() {
+					start = metric.GetStart()
+				}
+
+				if last < metric.GetLast() {
+					last = metric.GetLast()
+				}
+			}
+		}
+	}
 
 	steps := (last - start) / sliceLength
 	if (last-start)%sliceLength != 0 {
@@ -268,12 +283,12 @@ func (m *MetricsTraversalStep) Error() error {
 }
 
 // Count step
-func (m *MetricsTraversalStep) Count(s ...interface{}) *traversal.GraphTraversalValue {
+func (m *MetricsTraversalStep) Count(ctx traversal.StepContext, s ...interface{}) *traversal.GraphTraversalValue {
 	return traversal.NewGraphTraversalValue(m.GraphTraversal, len(m.metrics))
 }
 
 // PropertyKeys returns metric fields
-func (m *MetricsTraversalStep) PropertyKeys(keys ...interface{}) *traversal.GraphTraversalValue {
+func (m *MetricsTraversalStep) PropertyKeys(ctx traversal.StepContext, keys ...interface{}) *traversal.GraphTraversalValue {
 	if m.error != nil {
 		return traversal.NewGraphTraversalValueFromError(m.error)
 	}
@@ -284,7 +299,7 @@ func (m *MetricsTraversalStep) PropertyKeys(keys ...interface{}) *traversal.Grap
 		for _, metrics := range m.metrics {
 			// all Metric struct are the same, take the first one
 			if len(metrics) > 0 {
-				s = metrics[0].GetFields()
+				s = metrics[0].GetFieldKeys()
 				break
 			}
 		}

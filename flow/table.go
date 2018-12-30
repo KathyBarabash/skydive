@@ -75,64 +75,62 @@ type TableOpts struct {
 	IPDefrag       bool
 	ReassembleTCP  bool
 	LayerKeyMode   LayerKeyMode
+	ExtraLayers    ExtraLayers
 }
 
 // Table store the flow table and related metrics mechanism
 type Table struct {
-	Opts           TableOpts
-	packetSeqChan  chan *PacketSequence
-	flowChan       chan *Flow
-	table          map[string]*Flow
-	flush          chan bool
-	flushDone      chan bool
-	query          chan *TableQuery
-	reply          chan *TableReply
-	state          int64
-	lockState      common.RWMutex
-	wg             sync.WaitGroup
-	quit           chan bool
-	updateHandler  *Handler
-	lastUpdate     int64
-	updateVersion  int64
-	expireHandler  *Handler
-	lastExpire     int64
-	nodeTID        string
-	pipeline       *EnhancerPipeline
-	pipelineConfig *EnhancerPipelineConfig
-	ipDefragger    *IPDefragger
-	tcpAssembler   *TCPAssembler
-	flowOpts       FlowOpts
-	appPortMap     *ApplicationPortMap
+	Opts          TableOpts
+	packetSeqChan chan *PacketSequence
+	flowChan      chan *Flow
+	table         map[string]*Flow
+	flush         chan bool
+	flushDone     chan bool
+	query         chan *TableQuery
+	reply         chan *TableReply
+	state         int64
+	lockState     common.RWMutex
+	wg            sync.WaitGroup
+	quit          chan bool
+	updateHandler *Handler
+	lastUpdate    int64
+	updateVersion int64
+	expireHandler *Handler
+	lastExpire    int64
+	nodeTID       string
+	ipDefragger   *IPDefragger
+	tcpAssembler  *TCPAssembler
+	flowOpts      Opts
+	appPortMap    *ApplicationPortMap
 }
 
 // NewTable creates a new flow table
-func NewTable(updateHandler *Handler, expireHandler *Handler, pipeline *EnhancerPipeline, nodeTID string, opts ...TableOpts) *Table {
+func NewTable(updateHandler *Handler, expireHandler *Handler, nodeTID string, opts ...TableOpts) *Table {
 	t := &Table{
-		packetSeqChan:  make(chan *PacketSequence, 1000),
-		flowChan:       make(chan *Flow, 1000),
-		table:          make(map[string]*Flow),
-		flush:          make(chan bool),
-		flushDone:      make(chan bool),
-		state:          common.StoppedState,
-		quit:           make(chan bool),
-		updateHandler:  updateHandler,
-		expireHandler:  expireHandler,
-		pipeline:       pipeline,
-		pipelineConfig: NewEnhancerPipelineConfig(),
-		nodeTID:        nodeTID,
-		ipDefragger:    NewIPDefragger(),
-		tcpAssembler:   NewTCPAssembler(),
-		appPortMap:     NewApplicationPortMapFromConfig(),
+		packetSeqChan: make(chan *PacketSequence, 1000),
+		flowChan:      make(chan *Flow, 1000),
+		table:         make(map[string]*Flow),
+		flush:         make(chan bool),
+		flushDone:     make(chan bool),
+		state:         common.StoppedState,
+		quit:          make(chan bool),
+		updateHandler: updateHandler,
+		expireHandler: expireHandler,
+		nodeTID:       nodeTID,
+		ipDefragger:   NewIPDefragger(),
+		tcpAssembler:  NewTCPAssembler(),
+		appPortMap:    NewApplicationPortMapFromConfig(),
 	}
 	if len(opts) > 0 {
 		t.Opts = opts[0]
 	}
 
-	t.flowOpts = FlowOpts{
+	t.flowOpts = Opts{
 		TCPMetric:    t.Opts.ExtraTCPMetric,
 		IPDefrag:     t.Opts.IPDefrag,
 		LayerKeyMode: t.Opts.LayerKeyMode,
 		AppPortMap:   t.appPortMap,
+		ExtraLayers:  t.Opts.ExtraLayers,
 	}
 
 	t.updateVersion = 0
@@ -308,7 +306,7 @@ func (ft *Table) onQuery(query *TableQuery) *TableReply {
 	case "SearchQuery":
 		var fsq filters.SearchQuery
 		if err := proto.Unmarshal(query.Obj, &fsq); err != nil {
-			logging.GetLogger().Errorf("Unable to decode the flow search query: %s", err.Error())
+			logging.GetLogger().Errorf("Unable to decode the flow search query: %s", err)
 			break
 		}
 
@@ -358,7 +356,7 @@ func (ft *Table) packetToFlow(packet *Packet, parentUUID string) *Flow {
 	key := packet.Key(parentUUID, ft.flowOpts)
 	flow, new := ft.getOrCreateFlow(key)
 	if new {
-		uuids := FlowUUIDs{
+		uuids := UUIDs{
 			ParentUUID: parentUUID,
 		}
 
@@ -409,7 +407,13 @@ func (ft *Table) processFlow(fl *Flow) {
 		fl.LastUpdateMetric = prev.LastUpdateMetric
 
 		fl.XXX_state = prev.XXX_state
+		fl.XXX_state.updateVersion = ft.updateVersion + 1
 	}
+}
+
+// State returns the state of the flow table, stopped, running...
+func (ft *Table) State() int64 {
+	return atomic.LoadInt64(&ft.state)
 }
 
 // Run background jobs, like update/expire entries event

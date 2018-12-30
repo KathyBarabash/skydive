@@ -25,82 +25,33 @@ package k8s
 import (
 	"fmt"
 
-	"github.com/skydive-project/skydive/logging"
-	"github.com/skydive-project/skydive/probe"
-	"github.com/skydive-project/skydive/topology/graph"
+	"github.com/skydive-project/skydive/graffiti/graph"
 
 	"k8s.io/api/core/v1"
-	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/kubernetes"
 )
 
-type persistentVolumeClaimProbe struct {
-	defaultKubeCacheEventHandler
-	*kubeCache
-	graph *graph.Graph
+type persistentVolumeClaimHandler struct {
 }
 
-func dumpPersistentVolumeClaim(pvc *v1.PersistentVolumeClaim) string {
+func (h *persistentVolumeClaimHandler) Dump(obj interface{}) string {
+	pvc := obj.(*v1.PersistentVolumeClaim)
 	return fmt.Sprintf("persistentvolumeclaim{Name: %s}", pvc.GetName())
 }
 
-func (p *persistentVolumeClaimProbe) newMetadata(pvc *v1.PersistentVolumeClaim) graph.Metadata {
-	return newMetadata("persistentvolumeclaim", pvc.Namespace, pvc.GetName(), pvc)
+func (h *persistentVolumeClaimHandler) Map(obj interface{}) (graph.Identifier, graph.Metadata) {
+	pvc := obj.(*v1.PersistentVolumeClaim)
+
+	m := NewMetadataFields(&pvc.ObjectMeta)
+	m.SetFieldAndNormalize("AccessModes", pvc.Spec.AccessModes)
+	m.SetFieldAndNormalize("VolumeName", pvc.Spec.VolumeName)             // FIXME: replace by link to PersistentVolume
+	m.SetFieldAndNormalize("StorageClassName", pvc.Spec.StorageClassName) // FIXME: replace by link to StorageClass
+	m.SetFieldAndNormalize("VolumeMode", pvc.Spec.VolumeMode)
+	m.SetFieldAndNormalize("Status", pvc.Status.Phase)
+
+	return graph.Identifier(pvc.GetUID()), NewMetadata(Manager, "persistentvolumeclaim", m, pvc, pvc.Name)
 }
 
-func persistentVolumeClaimUID(pvc *v1.PersistentVolumeClaim) graph.Identifier {
-	return graph.Identifier(pvc.GetUID())
-}
-
-func (p *persistentVolumeClaimProbe) OnAdd(obj interface{}) {
-	if pvc, ok := obj.(*v1.PersistentVolumeClaim); ok {
-		p.graph.Lock()
-		defer p.graph.Unlock()
-
-		newNode(p.graph, persistentVolumeClaimUID(pvc), p.newMetadata(pvc))
-		logging.GetLogger().Debugf("Added %s", dumpPersistentVolumeClaim(pvc))
-	}
-}
-
-func (p *persistentVolumeClaimProbe) OnUpdate(oldObj, newObj interface{}) {
-	if pvc, ok := newObj.(*v1.PersistentVolumeClaim); ok {
-		p.graph.Lock()
-		defer p.graph.Unlock()
-
-		if node := p.graph.GetNode(persistentVolumeClaimUID(pvc)); node != nil {
-			addMetadata(p.graph, node, pvc)
-			logging.GetLogger().Debugf("Updated %s", dumpPersistentVolumeClaim(pvc))
-		}
-	}
-}
-
-func (p *persistentVolumeClaimProbe) OnDelete(obj interface{}) {
-	if pvc, ok := obj.(*v1.PersistentVolumeClaim); ok {
-		p.graph.Lock()
-		defer p.graph.Unlock()
-
-		if node := p.graph.GetNode(persistentVolumeClaimUID(pvc)); node != nil {
-			p.graph.DelNode(node)
-			logging.GetLogger().Debugf("Deleted %s", dumpPersistentVolumeClaim(pvc))
-		}
-	}
-}
-
-func (p *persistentVolumeClaimProbe) Start() {
-	p.kubeCache.Start()
-}
-
-func (p *persistentVolumeClaimProbe) Stop() {
-	p.kubeCache.Stop()
-}
-
-func newPersistentVolumeClaimKubeCache(handler cache.ResourceEventHandler) *kubeCache {
-	return newKubeCache(getClientset().CoreV1().RESTClient(), &v1.PersistentVolumeClaim{}, "persistentvolumeclaims", handler)
-}
-
-func newPersistentVolumeClaimProbe(g *graph.Graph) probe.Probe {
-	p := &persistentVolumeClaimProbe{
-		graph: g,
-	}
-	p.kubeCache = newPersistentVolumeClaimKubeCache(p)
-	return p
+func newPersistentVolumeClaimProbe(client interface{}, g *graph.Graph) Subprobe {
+	return NewResourceCache(client.(*kubernetes.Clientset).CoreV1().RESTClient(), &v1.PersistentVolumeClaim{}, "persistentvolumeclaims", g, &persistentVolumeClaimHandler{})
 }

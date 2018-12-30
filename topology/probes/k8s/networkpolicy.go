@@ -24,275 +24,325 @@ package k8s
 
 import (
 	"fmt"
+	"strings"
 
-	"github.com/skydive-project/skydive/filters"
+	"github.com/skydive-project/skydive/graffiti/graph"
 	"github.com/skydive-project/skydive/logging"
 	"github.com/skydive-project/skydive/probe"
-	"github.com/skydive-project/skydive/topology/graph"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/api/extensions/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/kubernetes"
 )
 
-type networkPolicyProbe struct {
-	defaultKubeCacheEventHandler
-	graph.DefaultGraphListener
-	*kubeCache
-	graph          *graph.Graph
-	podCache       *kubeCache
-	namespaceCache *kubeCache
-	objIndexer     *graph.MetadataIndexer
+type networkPolicyHandler struct {
 }
 
-func newObjectIndexerByNetworkPolicy(g *graph.Graph) *graph.MetadataIndexer {
-	ownedByFilter := filters.NewOrFilter(
-		filters.NewTermStringFilter("Type", "namespace"),
-		filters.NewTermStringFilter("Type", "pod"),
-	)
-
-	filter := filters.NewAndFilter(
-		filters.NewTermStringFilter("Manager", managerValue),
-		ownedByFilter,
-	)
-	m := graph.NewGraphElementFilter(filter)
-	return graph.NewMetadataIndexer(g, m)
-}
-
-func (n *networkPolicyProbe) newMetadata(np *v1beta1.NetworkPolicy) graph.Metadata {
-	m := newMetadata("networkpolicy", np.Namespace, np.Name, np)
-	m.SetFieldAndNormalize("Labels", np.Labels)
-	m.SetFieldAndNormalize("PodSelector", np.Spec.PodSelector)
-	return m
-}
-
-func networkPolicyUID(np *v1beta1.NetworkPolicy) graph.Identifier {
-	return graph.Identifier(np.GetUID())
-}
-
-func dumpNetworkPolicy(np *v1beta1.NetworkPolicy) string {
+func (h *networkPolicyHandler) Dump(obj interface{}) string {
+	np := obj.(*v1beta1.NetworkPolicy)
 	return fmt.Sprintf("networkPolicy{Namespace: %s, Name: %s}", np.Namespace, np.Name)
 }
 
-func (n *networkPolicyProbe) OnAdd(obj interface{}) {
-	if np, ok := obj.(*v1beta1.NetworkPolicy); ok {
-		logging.GetLogger().Debugf("Adding %s", dumpNetworkPolicy(np))
-		n.graph.Lock()
-		npNode := newNode(n.graph, networkPolicyUID(np), n.newMetadata(np))
-		n.handleNetworkPolicyUpdate(npNode, np)
-		n.graph.Unlock()
-	}
+func (h *networkPolicyHandler) Map(obj interface{}) (graph.Identifier, graph.Metadata) {
+	np := obj.(*v1beta1.NetworkPolicy)
+	m := NewMetadataFields(&np.ObjectMeta)
+	return graph.Identifier(np.GetUID()), NewMetadata(Manager, "networkpolicy", m, np, np.Name)
 }
 
-func (n *networkPolicyProbe) OnUpdate(oldObj, newObj interface{}) {
-	if np, ok := newObj.(*v1beta1.NetworkPolicy); ok {
-		logging.GetLogger().Debugf("Updating %s", dumpNetworkPolicy(np))
-		n.graph.Lock()
-		if npNode := n.graph.GetNode(networkPolicyUID(np)); npNode != nil {
-			addMetadata(n.graph, npNode, np)
-			n.handleNetworkPolicyUpdate(npNode, np)
+func newNetworkPolicyProbe(client interface{}, g *graph.Graph) Subprobe {
+	return NewResourceCache(client.(*kubernetes.Clientset).ExtensionsV1beta1().RESTClient(), &v1beta1.NetworkPolicy{}, "networkpolicies", g, &networkPolicyHandler{})
+}
+
+type networkPolicyLinker struct {
+	graph          *graph.Graph
+	npCache        *ResourceCache
+	podCache       *ResourceCache
+	namespaceCache *ResourceCache
+}
+
+// PolicyType defines the policy type (ingress or egress)
+type PolicyType string
+
+// Policy types
+const (
+	PolicyTypeIngress PolicyType = "ingress"
+	PolicyTypeEgress  PolicyType = "egress"
+)
+
+// String returns the string representation of a policy type
+func (val PolicyType) String() string {
+	return string(val)
+}
+
+// PolicyTarget defines whether traffic is allowed or denied
+type PolicyTarget string
+
+// Policy targets
+const (
+	PolicyTargetDeny  PolicyTarget = "deny"
+	PolicyTargetAllow PolicyTarget = "allow"
+)
+
+// String returns the string representation of a policy target
+func (val PolicyTarget) String() string {
+	return string(val)
+}
+
+// PolicyPoint defines whether a policy applies to a of pods
+// or if it restricts access from a set of pods
+type PolicyPoint string
+
+// PolicyPoint values
+const (
+	PolicyPointBegin PolicyPoint = "begin"
+	PolicyPointEnd   PolicyPoint = "end"
+)
+
+// String returns the string representation of a PolicyPoint
+func (val PolicyPoint) String() string {
+	return string(val)
+}
+
+func isIngress(np *v1beta1.NetworkPolicy) bool {
+	if len(np.Spec.Ingress) != 0 {
+		return true
+	}
+	if len(np.Spec.PolicyTypes) == 0 {
+		return true
+	}
+	for _, ty := range np.Spec.PolicyTypes {
+		if ty == v1beta1.PolicyTypeIngress {
+			return true
 		}
-		n.graph.Unlock()
 	}
+	return false
 }
 
-func (n *networkPolicyProbe) OnDelete(obj interface{}) {
-	if np, ok := obj.(*v1beta1.NetworkPolicy); ok {
-		logging.GetLogger().Debugf("Deleting %s", dumpNetworkPolicy(np))
-		n.graph.Lock()
-		if npNode := n.graph.GetNode(networkPolicyUID((np))); npNode != nil {
-			n.graph.DelNode(npNode)
+func isEgress(np *v1beta1.NetworkPolicy) bool {
+	if len(np.Spec.Egress) != 0 {
+		return true
+	}
+	for _, ty := range np.Spec.PolicyTypes {
+		if ty == v1beta1.PolicyTypeEgress {
+			return true
 		}
-		n.graph.Unlock()
 	}
+	return false
 }
 
-func (n *networkPolicyProbe) getPodSelector(np *v1beta1.NetworkPolicy) labels.Selector {
+func isIngressDeny(np *v1beta1.NetworkPolicy) bool {
 	selector, _ := metav1.LabelSelectorAsSelector(&np.Spec.PodSelector)
-	return selector
+	return selector.Empty() && len(np.Spec.Ingress) == 0
 }
 
-func (n *networkPolicyProbe) filterPodByLabels(in []interface{}, np *v1beta1.NetworkPolicy) (out []interface{}) {
-	selector := n.getPodSelector(np)
+func isEgressDeny(np *v1beta1.NetworkPolicy) bool {
+	selector, _ := metav1.LabelSelectorAsSelector(&np.Spec.PodSelector)
+	return selector.Empty() && len(np.Spec.Egress) == 0
+}
+
+func filterPodByPodSelector(in []interface{}, podSelector *metav1.LabelSelector, namespace string) (pods []metav1.Object) {
+	selector, _ := metav1.LabelSelectorAsSelector(podSelector)
 	for _, pod := range in {
-		pod := pod.(*corev1.Pod)
-		if np.Namespace == pod.Namespace && selector.Matches(labels.Set(pod.Labels)) {
-			out = append(out, pod)
+		pod := pod.(metav1.Object)
+		if namespace != pod.GetNamespace() {
+			continue
 		}
+		if podSelector == nil {
+			goto Append
+		}
+		if selector.Empty() {
+			goto Append
+		}
+		if selector.Matches(labels.Set(pod.GetLabels())) {
+			goto Append
+		}
+		continue
+	Append:
+		pods = append(pods, pod.(metav1.Object))
 	}
 	return
 }
 
-func (n *networkPolicyProbe) filterNamespaceByLabels(in []interface{}, np *v1beta1.NetworkPolicy) (out []interface{}) {
-	if !n.getPodSelector(np).Empty() {
-		return
-	}
-
-	for _, obj := range in {
-		ns := obj.(*corev1.Namespace)
-		if np.Namespace == ns.Name {
-			out = append(out, ns)
-		}
-	}
-	return
-}
-
-func (n *networkPolicyProbe) selectedPods(np *v1beta1.NetworkPolicy) (nodes []*graph.Node) {
-	pods := n.podCache.list()
-	pods = n.filterPodByLabels(pods, np)
-	for _, pod := range pods {
-		pod := pod.(*corev1.Pod)
-		if podNode := n.graph.GetNode(podUID(pod)); podNode != nil {
-			nodes = append(nodes, podNode)
-		}
-	}
-	logging.GetLogger().Debugf("found %d pods", len(nodes))
-	return
-}
-
-func (n *networkPolicyProbe) selectedNamespaces(np *v1beta1.NetworkPolicy) (nodes []*graph.Node) {
-	nss := n.namespaceCache.list()
-	nss = n.filterNamespaceByLabels(nss, np)
-	for _, ns := range nss {
+func filterNamespaceByNamespaceSelector(in []interface{}, namespaceSelector *metav1.LabelSelector) (namespaces []metav1.Object) {
+	selector, _ := metav1.LabelSelectorAsSelector(namespaceSelector)
+	for _, ns := range in {
 		ns := ns.(*corev1.Namespace)
-		if nsNode := n.graph.GetNode(namespaceUID(ns)); nsNode != nil {
-			nodes = append(nodes, nsNode)
+		if selector.Matches(labels.Set(ns.Labels)) {
+			namespaces = append(namespaces, ns)
 		}
 	}
-	logging.GetLogger().Debugf("found %d namespaces", len(nodes))
 	return
 }
 
-func (n *networkPolicyProbe) selected(np *v1beta1.NetworkPolicy) (nodes []*graph.Node) {
-	pods := n.selectedPods(np)
-	nss := n.selectedNamespaces(np)
-	return append(pods, nss...)
-}
-
-func (n *networkPolicyProbe) isPodSelected(np *v1beta1.NetworkPolicy, pod *corev1.Pod) bool {
-	return len(n.filterPodByLabels([]interface{}{pod}, np)) == 1
-}
-
-func (n *networkPolicyProbe) isNamespaceSelected(np *v1beta1.NetworkPolicy, ns *corev1.Namespace) bool {
-	return len(n.filterNamespaceByLabels([]interface{}{ns}, np)) == 1
-}
-
-func (n *networkPolicyProbe) isSelected(np *v1beta1.NetworkPolicy, obj interface{}) bool {
-	switch obj := obj.(type) {
-	case *corev1.Pod:
-		return n.isPodSelected(np, obj)
-	case *corev1.Namespace:
-		return n.isNamespaceSelected(np, obj)
-	default:
-		return false
-	}
-}
-
-func (n *networkPolicyProbe) handleNetworkPolicyUpdate(npNode *graph.Node, np *v1beta1.NetworkPolicy) {
-	logging.GetLogger().Debugf("Handling update of %s", dumpNetworkPolicy(np))
-
-	selected := n.selected(np)
-	staleChilderen := make(map[graph.Identifier]*graph.Node)
-	childFilter := graph.Metadata{
-		"Manager": managerValue,
+func (npl *networkPolicyLinker) getPeerPods(peer v1beta1.NetworkPolicyPeer, namespace string) (pods []metav1.Object) {
+	if podSelector := peer.PodSelector; podSelector != nil {
+		pods = filterPodByPodSelector(npl.podCache.List(), podSelector, namespace)
 	}
 
-	for _, child := range n.graph.LookupChildren(npNode, childFilter, newEdgeMetadata()) {
-		logging.GetLogger().Debugf("found child %s", dumpGraphNode(child))
-		staleChilderen[child.ID] = child
+	if nsSelector := peer.NamespaceSelector; nsSelector != nil {
+		if allPods := npl.podCache.List(); len(allPods) != 0 {
+			for _, ns := range filterNamespaceByNamespaceSelector(npl.namespaceCache.List(), nsSelector) {
+				pods = append(pods, filterPodByPodSelector(allPods, nil, ns.(*corev1.Namespace).Name)...)
+			}
+		}
+	}
+	return
+}
+
+func (npl *networkPolicyLinker) getIngressAllow(np *v1beta1.NetworkPolicy) (pods []metav1.Object) {
+	for _, rule := range np.Spec.Ingress {
+		for _, from := range rule.From {
+			pods = append(pods, npl.getPeerPods(from, np.Namespace)...)
+		}
+	}
+	return
+}
+
+func (npl *networkPolicyLinker) getEgressAllow(np *v1beta1.NetworkPolicy) (pods []metav1.Object) {
+	for _, rule := range np.Spec.Egress {
+		for _, to := range rule.To {
+			pods = append(pods, npl.getPeerPods(to, np.Namespace)...)
+		}
+	}
+	return
+}
+
+func fmtFieldPorts(ports []v1beta1.NetworkPolicyPort) string {
+	strPorts := []string{}
+	for _, p := range ports {
+		proto := ""
+		if p.Protocol != nil && *p.Protocol != corev1.ProtocolTCP {
+			proto = "/" + string(*p.Protocol)
+		}
+		strPorts = append(strPorts, fmt.Sprintf(":%s%s", p.Port, proto))
+	}
+	return strings.Join(strPorts, ";")
+}
+
+func getFieldPorts(np *v1beta1.NetworkPolicy, ty PolicyType) string {
+	// TODO extend logic to be able to extract the correct (per Pod object)
+	// port filter, for now all we can do is extract the ports in the case
+	// that there is only a single Ingress/egress rule (in which case we
+	// *know* the port filter applies to the specific edge).
+	ports := []v1beta1.NetworkPolicyPort{}
+	switch ty {
+	case PolicyTypeIngress:
+		if len(np.Spec.Ingress) == 1 {
+			ports = np.Spec.Ingress[0].Ports
+		}
+	case PolicyTypeEgress:
+		if len(np.Spec.Egress) == 1 {
+			ports = np.Spec.Egress[0].Ports
+		}
+	}
+	return fmtFieldPorts(ports)
+}
+
+func (npl *networkPolicyLinker) newEdgeMetadata(ty PolicyType, target PolicyTarget, point PolicyPoint) graph.Metadata {
+	m := NewEdgeMetadata(Manager, "association")
+	m.SetField("RelationType", "networkpolicy")
+	m.SetField("PolicyType", string(ty))
+	m.SetField("PolicyTarget", string(target))
+	m.SetField("PolicyPoint", string(point))
+	return m
+}
+
+func (npl *networkPolicyLinker) createLinks(np *v1beta1.NetworkPolicy, npNode, filterNode *graph.Node, ty PolicyType, target PolicyTarget, point PolicyPoint, pods []metav1.Object) (edges []*graph.Edge) {
+	podNodes := objectsToNodes(npl.graph, pods)
+	metadata := npl.newEdgeMetadata(ty, target, point)
+	for _, objNode := range podNodes {
+		if filterNode == nil || filterNode.ID == objNode.ID {
+			metadata.SetFieldAndNormalize("PolicyPorts", getFieldPorts(np, ty))
+			fields := []string{string(npNode.ID), string(objNode.ID)}
+			for k, v := range metadata {
+				fields = append(fields, k, v.(string))
+			}
+			id := graph.GenID(fields...)
+			edges = append(edges, npl.graph.CreateEdge(id, npNode, objNode, metadata, graph.TimeUTC(), ""))
+		}
+	}
+	return
+}
+
+func (npl *networkPolicyLinker) getLinks(np *v1beta1.NetworkPolicy, npNode, filterNode *graph.Node) (edges []*graph.Edge) {
+	createLinks := func(ty PolicyType, target PolicyTarget, pods []metav1.Object) []*graph.Edge {
+		selectedPods := filterPodByPodSelector(npl.podCache.List(), &np.Spec.PodSelector, np.Namespace)
+		return append(
+			npl.createLinks(np, npNode, filterNode, ty, target, PolicyPointBegin, selectedPods),
+			npl.createLinks(np, npNode, filterNode, ty, target, PolicyPointEnd, pods)...,
+		)
 	}
 
-	for _, objNode := range selected {
-		if _, found := staleChilderen[objNode.ID]; found {
-			delete(staleChilderen, objNode.ID)
+	if isIngress(np) {
+		if isIngressDeny(np) {
+			edges = append(edges, createLinks(PolicyTypeIngress, PolicyTargetDeny, npl.getIngressAllow(np))...)
+		} else {
+			edges = append(edges, createLinks(PolicyTypeIngress, PolicyTargetAllow, npl.getIngressAllow(np))...)
 		}
 	}
 
-	for _, child := range staleChilderen {
-		delLink(n.graph, npNode, child)
+	if isEgress(np) {
+		if isEgressDeny(np) {
+			edges = append(edges, createLinks(PolicyTypeEgress, PolicyTargetDeny, npl.getEgressAllow(np))...)
+		} else {
+			edges = append(edges, createLinks(PolicyTypeEgress, PolicyTargetAllow, npl.getEgressAllow(np))...)
+		}
 	}
 
-	for _, objNode := range selected {
-		addLink(n.graph, npNode, objNode)
-	}
+	return
 }
 
-func (n *networkPolicyProbe) getObjByNode(node *graph.Node) interface{} {
-	var cache *kubeCache
+func (npl *networkPolicyLinker) GetABLinks(npNode *graph.Node) (edges []*graph.Edge) {
+	if np := npl.npCache.GetByNode(npNode); np != nil {
+		np := np.(*v1beta1.NetworkPolicy)
+		return npl.getLinks(np, npNode, nil)
+	}
+	return
+}
 
-	ty, _ := node.GetFieldString("Type")
-	switch ty {
-	case "pod":
-		cache = n.podCache
-	case "namespace":
-		cache = n.namespaceCache
-	default:
+func (npl *networkPolicyLinker) GetBALinks(objNode *graph.Node) (edges []*graph.Edge) {
+	for _, np := range npl.npCache.List() {
+		np := np.(*v1beta1.NetworkPolicy)
+		npNode := npl.graph.GetNode(graph.Identifier(np.GetUID()))
+		if npNode == nil {
+			logging.GetLogger().Debugf("can't find networkpolicy %s", np.GetUID())
+			continue
+		}
+		if nodeType, _ := objNode.GetFieldString("Type"); nodeType == "pod" {
+			return npl.getLinks(np, npNode, objNode)
+		}
+		// FIXME: for type "namespace" its' more efficient to
+		// loop through all related pods rather than pass nil
+		return npl.getLinks(np, npNode, nil)
+	}
+
+	return
+}
+
+func newNetworkPolicyLinker(g *graph.Graph) probe.Probe {
+	npProbe := GetSubprobe(Manager, "networkpolicy")
+	podProbe := GetSubprobe(Manager, "pod")
+	namespaceProbe := GetSubprobe(Manager, "namespace")
+	if npProbe == nil || podProbe == nil || namespaceProbe == nil {
 		return nil
 	}
 
-	namespace, _ := node.GetFieldString("Namespace")
-	name, _ := node.GetFieldString("Name")
-	obj := cache.getByKey(namespace, name)
-	return obj
-}
-
-func (n *networkPolicyProbe) onNodeUpdated(objNode *graph.Node) {
-	logging.GetLogger().Debugf("update links: %s", dumpGraphNode(objNode))
-	obj := n.getObjByNode(objNode)
-	if obj == nil {
-		logging.GetLogger().Debugf("can't find %s", dumpGraphNode(objNode))
-		return
-	}
-
-	for _, np := range n.kubeCache.list() {
-		np := np.(*v1beta1.NetworkPolicy)
-		logging.GetLogger().Debugf("refreshing %s", dumpNetworkPolicy(np))
-		npNode := n.graph.GetNode(networkPolicyUID(np))
-		if npNode == nil {
-			logging.GetLogger().Debugf("can't find %s", dumpNetworkPolicy(np))
-			continue
-		}
-		syncLink(n.graph, npNode, objNode, n.isSelected(np, obj))
-	}
-}
-
-func (n *networkPolicyProbe) OnNodeAdded(node *graph.Node) {
-	n.onNodeUpdated(node)
-}
-
-func (n *networkPolicyProbe) OnNodeUpdated(node *graph.Node) {
-	n.onNodeUpdated(node)
-}
-
-func (n *networkPolicyProbe) Start() {
-	n.objIndexer.AddEventListener(n)
-	n.objIndexer.Start()
-	n.kubeCache.Start()
-	n.podCache.Start()
-	n.namespaceCache.Start()
-}
-
-func (n *networkPolicyProbe) Stop() {
-	n.objIndexer.RemoveEventListener(n)
-	n.objIndexer.Stop()
-	n.kubeCache.Stop()
-	n.podCache.Stop()
-	n.namespaceCache.Stop()
-}
-
-func newNetworkPolicyKubeCache(handler cache.ResourceEventHandler) *kubeCache {
-	return newKubeCache(getClientset().ExtensionsV1beta1().RESTClient(), &v1beta1.NetworkPolicy{}, "networkpolicies", handler)
-}
-
-func newNetworkPolicyProbe(g *graph.Graph) probe.Probe {
-	n := &networkPolicyProbe{
+	npLinker := &networkPolicyLinker{
 		graph:          g,
-		podCache:       newPodKubeCache(nil),
-		namespaceCache: newNamespaceKubeCache(nil),
-		objIndexer:     newObjectIndexerByNetworkPolicy(g),
+		npCache:        npProbe.(*ResourceCache),
+		podCache:       podProbe.(*ResourceCache),
+		namespaceCache: namespaceProbe.(*ResourceCache),
 	}
-	n.kubeCache = newNetworkPolicyKubeCache(n)
-	return n
+
+	rl := graph.NewResourceLinker(g, []graph.ListenerHandler{npProbe}, []graph.ListenerHandler{podProbe, namespaceProbe},
+		npLinker, graph.Metadata{"RelationType": "networkpolicy"})
+
+	linker := &Linker{
+		ResourceLinker: rl,
+	}
+	rl.AddEventListener(linker)
+
+	return linker
 }

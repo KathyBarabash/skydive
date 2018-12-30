@@ -25,8 +25,8 @@ package topology
 import (
 	"github.com/nu7hatch/gouuid"
 
+	"github.com/skydive-project/skydive/graffiti/graph"
 	"github.com/skydive-project/skydive/logging"
-	"github.com/skydive-project/skydive/topology/graph"
 )
 
 // TIDMapper describes the hostID nodes stored in a graph
@@ -105,7 +105,7 @@ func (t *TIDMapper) onNodeEvent(n *graph.Node) {
 				if probe, _ := n.GetFieldString("Probe"); probe == "fabric" {
 					t.Graph.AddMetadata(n, "TID", string(n.ID))
 				} else {
-					parents := t.Graph.LookupParents(n, nil, OwnershipMetadata)
+					parents := t.Graph.LookupParents(n, nil, OwnershipMetadata())
 					if len(parents) > 1 {
 						logging.GetLogger().Errorf("A should always only have one ownership parent: %v", n)
 					} else if len(parents) == 1 {

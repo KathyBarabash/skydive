@@ -23,23 +23,41 @@
 package k8s
 
 import (
-	corev1 "k8s.io/api/core/v1"
+	"sync"
+	"time"
 
-	"github.com/skydive-project/skydive/config"
+	"github.com/skydive-project/skydive/graffiti/graph"
 	"github.com/skydive-project/skydive/logging"
 	"github.com/skydive-project/skydive/probe"
-	"github.com/skydive-project/skydive/topology/graph"
+
+	"k8s.io/apimachinery/pkg/util/runtime"
 )
 
-func dumpObject(obj interface{}) string {
-	switch obj := obj.(type) {
-	case *corev1.Namespace:
-		return dumpNamespace(obj)
-	case *corev1.Pod:
-		return dumpPod(obj)
-	default:
-		return "<nil>"
+var subprobes = make(map[string]map[string]Subprobe)
+
+// PutSubprobe puts a new subprobe in the subprobes map
+func PutSubprobe(manager, name string, subprobe Subprobe) {
+	subprobes[manager][name] = subprobe
+}
+
+// GetSubprobe returns a specific subprobe
+func GetSubprobe(manager, name string) Subprobe {
+	return subprobes[manager][name]
+}
+
+// GetSubprobesMap returns a map of all the subprobes that belong to manager probe
+func GetSubprobesMap(manager string) map[string]Subprobe {
+	return subprobes[manager]
+}
+
+// ListSubprobes returns the list of Subprobe as ListernerHandler
+func ListSubprobes(manager string, types ...string) (handlers []graph.ListenerHandler) {
+	for _, t := range types {
+		if subprobe := GetSubprobe(Manager, t); subprobe != nil {
+			handlers = append(handlers, subprobe)
+		}
 	}
+	return
 }
 
 func int32ValueOrDefault(value *int32, defaultValue int32) int32 {
@@ -51,68 +69,135 @@ func int32ValueOrDefault(value *int32, defaultValue int32) int32 {
 
 // Probe for tracking k8s events
 type Probe struct {
-	bundle *probe.ProbeBundle
+	graph     *graph.Graph
+	manager   string
+	subprobes map[string]Subprobe
+	linkers   []probe.Probe
 }
 
-func makeProbeBundle(g *graph.Graph) *probe.ProbeBundle {
-	name2ctor := map[string](func(*graph.Graph) probe.Probe){
-		"cluster":               newClusterProbe,
-		"container":             newContainerProbe,
-		"cronjob":               newCronJobProbe,
-		"daemonset":             newDaemonSetProbe,
-		"deployment":            newDeploymentProbe,
-		"ingress":               newIngressProbe,
-		"job":                   newJobProbe,
-		"namespace":             newNamespaceProbe,
-		"networkpolicy":         newNetworkPolicyProbe,
-		"node":                  newNodeProbe,
-		"persistentvolume":      newPersistentVolumeProbe,
-		"persistentvolumeclaim": newPersistentVolumeClaimProbe,
-		"pod":                   newPodProbe,
-		"replicaset":            newReplicaSetProbe,
-		"replicationcontroller": newReplicationControllerProbe,
-		"service":               newServiceProbe,
-		"statefulset":           newStatefulSetProbe,
-		"storageclass":          newStorageClassProbe,
-	}
+// Subprobe describes a probe for a specific Kubernetes resource
+// It must implement the ListenerHandler interface so that you
+// listen for creation/update/removal of a resource
+type Subprobe interface {
+	probe.Probe
+	graph.ListenerHandler
+}
 
-	configProbes := config.GetStringSlice("k8s.probes")
-	if len(configProbes) == 0 {
-		for name := range name2ctor {
-			configProbes = append(configProbes, name)
-		}
-	}
-	logging.GetLogger().Infof("K8s probes: %v", configProbes)
+// Linker defines a k8s linker
+type Linker struct {
+	*graph.ResourceLinker
+}
 
-	probes := make(map[string]probe.Probe)
-	for _, name := range configProbes {
-		if ctor, ok := name2ctor[name]; ok {
-			probes[name] = ctor(g)
-		} else {
-			logging.GetLogger().Errorf("skipping unsupported K8s probe %v", name)
-		}
-	}
-	return probe.NewProbeBundle(probes)
+// OnError implements the LinkerEventListener interface
+func (l *Linker) OnError(err error) {
+	logging.GetLogger().Error(err)
 }
 
 // Start k8s probe
 func (p *Probe) Start() {
-	p.bundle.Start()
+	for _, linker := range p.linkers {
+		linker.Start()
+	}
+
+	for _, subprobe := range p.subprobes {
+		subprobe.Start()
+	}
 }
 
 // Stop k8s probe
 func (p *Probe) Stop() {
-	p.bundle.Stop()
-}
-
-// NewProbe create the Probe for tracking k8s events
-func NewProbe(g *graph.Graph) (*Probe, error) {
-	err := initClientset()
-	if err != nil {
-		return nil, err
+	for _, linker := range p.linkers {
+		linker.Stop()
 	}
 
+	for _, subprobe := range p.subprobes {
+		subprobe.Stop()
+	}
+}
+
+// AppendClusterLinkers appends newly created cluster linker per type
+func (p *Probe) AppendClusterLinkers(types ...string) {
+	if clusterLinker := newClusterLinker(p.graph, p.manager, types...); clusterLinker != nil {
+		p.linkers = append(p.linkers, clusterLinker)
+	}
+}
+
+// AppendNamespaceLinkers appends newly created namespace linker per type
+func (p *Probe) AppendNamespaceLinkers(types ...string) {
+	if namespaceLinker := newNamespaceLinker(p.graph, p.manager, types...); namespaceLinker != nil {
+		p.linkers = append(p.linkers, namespaceLinker)
+	}
+}
+
+// NewProbe creates the probe for tracking k8s events
+func NewProbe(g *graph.Graph, manager string, subprobes map[string]Subprobe, linkers []probe.Probe) *Probe {
+	names := []string{}
+	for k := range subprobes {
+		names = append(names, k)
+	}
+	logging.GetLogger().Infof("Probe %s subprobes %v", manager, names)
 	return &Probe{
-		bundle: makeProbeBundle(g),
-	}, nil
+		graph:     g,
+		manager:   manager,
+		subprobes: subprobes,
+		linkers:   linkers,
+	}
+}
+
+// SubprobeHandler the signature of ctor of a subprobe
+type SubprobeHandler func(client interface{}, g *graph.Graph) Subprobe
+
+// InitSubprobes initializes only the subprobes which are enabled
+func InitSubprobes(enabled []string, subprobeHandlers map[string]SubprobeHandler, client interface{}, g *graph.Graph, manager string) {
+
+	subprobes[manager] = make(map[string]Subprobe)
+	if len(enabled) == 0 {
+		for name := range subprobeHandlers {
+			enabled = append(enabled, name)
+		}
+	}
+
+	for _, name := range enabled {
+		handler := subprobeHandlers[name]
+		PutSubprobe(manager, name, handler(client, g))
+	}
+}
+
+func logOnError(err error) {
+	logging.GetLogger().Warning(err)
+}
+
+type errorThrottle struct {
+	period   time.Duration
+	lastLock sync.RWMutex
+	last     time.Time
+}
+
+func (r *errorThrottle) onError(error) {
+	r.lastLock.RLock()
+	d := time.Since(r.last)
+	r.lastLock.RUnlock()
+
+	if d < r.period {
+		time.Sleep(r.period - d)
+	}
+
+	r.lastLock.Lock()
+	r.last = time.Now()
+	r.lastLock.Unlock()
+}
+
+func muteInternalErrors() {
+	throttle := errorThrottle{
+		period: time.Second,
+		last:   time.Now(),
+	}
+	runtime.ErrorHandlers = []func(error){
+		logOnError,
+		throttle.onError,
+	}
+}
+
+func init() {
+	muteInternalErrors()
 }

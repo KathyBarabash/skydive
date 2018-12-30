@@ -25,82 +25,26 @@ package k8s
 import (
 	"fmt"
 
-	"github.com/skydive-project/skydive/logging"
-	"github.com/skydive-project/skydive/probe"
-	"github.com/skydive-project/skydive/topology/graph"
+	"github.com/skydive-project/skydive/graffiti/graph"
 
 	"k8s.io/api/extensions/v1beta1"
-	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/kubernetes"
 )
 
-type replicaSetProbe struct {
-	defaultKubeCacheEventHandler
-	*kubeCache
-	graph *graph.Graph
+type replicaSetHandler struct {
 }
 
-func dumpReplicaSet(rs *v1beta1.ReplicaSet) string {
+func (h *replicaSetHandler) Dump(obj interface{}) string {
+	rs := obj.(*v1beta1.ReplicaSet)
 	return fmt.Sprintf("replicaset{Name: %s}", rs.GetName())
 }
 
-func (p *replicaSetProbe) newMetadata(rs *v1beta1.ReplicaSet) graph.Metadata {
-	return newMetadata("replicaset", rs.Namespace, rs.GetName(), rs)
+func (h *replicaSetHandler) Map(obj interface{}) (graph.Identifier, graph.Metadata) {
+	rs := obj.(*v1beta1.ReplicaSet)
+	m := NewMetadataFields(&rs.ObjectMeta)
+	return graph.Identifier(rs.GetUID()), NewMetadata(Manager, "replicaset", m, rs, rs.Name)
 }
 
-func replicaSetUID(rs *v1beta1.ReplicaSet) graph.Identifier {
-	return graph.Identifier(rs.GetUID())
-}
-
-func (p *replicaSetProbe) OnAdd(obj interface{}) {
-	if rs, ok := obj.(*v1beta1.ReplicaSet); ok {
-		p.graph.Lock()
-		defer p.graph.Unlock()
-
-		newNode(p.graph, replicaSetUID(rs), p.newMetadata(rs))
-		logging.GetLogger().Debugf("Added %s", dumpReplicaSet(rs))
-	}
-}
-
-func (p *replicaSetProbe) OnUpdate(oldObj, newObj interface{}) {
-	if rs, ok := newObj.(*v1beta1.ReplicaSet); ok {
-		p.graph.Lock()
-		defer p.graph.Unlock()
-
-		if node := p.graph.GetNode(replicaSetUID(rs)); node != nil {
-			addMetadata(p.graph, node, rs)
-			logging.GetLogger().Debugf("Updated %s", dumpReplicaSet(rs))
-		}
-	}
-}
-
-func (p *replicaSetProbe) OnDelete(obj interface{}) {
-	if rs, ok := obj.(*v1beta1.ReplicaSet); ok {
-		p.graph.Lock()
-		defer p.graph.Unlock()
-
-		if node := p.graph.GetNode(replicaSetUID(rs)); node != nil {
-			p.graph.DelNode(node)
-			logging.GetLogger().Debugf("Deleted %s", dumpReplicaSet(rs))
-		}
-	}
-}
-
-func (p *replicaSetProbe) Start() {
-	p.kubeCache.Start()
-}
-
-func (p *replicaSetProbe) Stop() {
-	p.kubeCache.Stop()
-}
-
-func newReplicaSetKubeCache(handler cache.ResourceEventHandler) *kubeCache {
-	return newKubeCache(getClientset().ExtensionsV1beta1().RESTClient(), &v1beta1.ReplicaSet{}, "replicasets", handler)
-}
-
-func newReplicaSetProbe(g *graph.Graph) probe.Probe {
-	p := &replicaSetProbe{
-		graph: g,
-	}
-	p.kubeCache = newReplicaSetKubeCache(p)
-	return p
+func newReplicaSetProbe(client interface{}, g *graph.Graph) Subprobe {
+	return NewResourceCache(client.(*kubernetes.Clientset).ExtensionsV1beta1().RESTClient(), &v1beta1.ReplicaSet{}, "replicasets", g, &replicaSetHandler{})
 }

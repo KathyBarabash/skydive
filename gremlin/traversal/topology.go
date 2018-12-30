@@ -23,30 +23,29 @@
 package traversal
 
 import (
+	"errors"
 	"strings"
 
-	"github.com/mitchellh/mapstructure"
-
 	"github.com/skydive-project/skydive/common"
+	"github.com/skydive-project/skydive/graffiti/graph"
+	"github.com/skydive-project/skydive/graffiti/graph/traversal"
 	"github.com/skydive-project/skydive/topology"
-	"github.com/skydive-project/skydive/topology/graph"
-	"github.com/skydive-project/skydive/topology/graph/traversal"
 	"github.com/skydive-project/skydive/topology/probes/socketinfo"
 )
 
 // InterfaceMetrics returns a Metrics step from interface metric metadata
-func InterfaceMetrics(tv *traversal.GraphTraversalV) *MetricsTraversalStep {
+func InterfaceMetrics(ctx traversal.StepContext, tv *traversal.GraphTraversalV) *MetricsTraversalStep {
 	if tv.Error() != nil {
 		return NewMetricsTraversalStepFromError(tv.Error())
 	}
 
-	tv = tv.Dedup("ID", "LastUpdateMetric.Start").Sort(common.SortAscending, "LastUpdateMetric.Start")
+	tv = tv.Dedup(ctx, "ID", "LastUpdateMetric.Start").Sort(ctx, common.SortAscending, "LastUpdateMetric.Start")
 	if tv.Error() != nil {
 		return NewMetricsTraversalStepFromError(tv.Error())
 	}
 
 	metrics := make(map[string][]common.Metric)
-	it := tv.GraphTraversal.CurrentStepContext().PaginationRange.Iterator()
+	it := ctx.PaginationRange.Iterator()
 	gslice := tv.GraphTraversal.Graph.GetContext().TimeSlice
 
 	tv.GraphTraversal.RLock()
@@ -63,15 +62,13 @@ nodeloop:
 			continue
 		}
 
-		// NOTE(safchain) mapstructure for now, need to be change once converted from json to
-		// protobuf
-		var lastMetric topology.InterfaceMetric
-		if err := mapstructure.WeakDecode(m, &lastMetric); err != nil {
-			return NewMetricsTraversalStepFromError(err)
+		lastMetric, ok := m.(*topology.InterfaceMetric)
+		if !ok {
+			return NewMetricsTraversalStepFromError(errors.New("wrong interface metric type"))
 		}
 
 		if gslice == nil || (lastMetric.Start > gslice.Start && lastMetric.Last < gslice.Last) && it.Next() {
-			metrics[string(n.ID)] = append(metrics[string(n.ID)], &lastMetric)
+			metrics[string(n.ID)] = append(metrics[string(n.ID)], lastMetric)
 		}
 	}
 
@@ -79,12 +76,12 @@ nodeloop:
 }
 
 // Sockets returns a sockets step from host/namespace sockets
-func Sockets(tv *traversal.GraphTraversalV) *SocketsTraversalStep {
+func Sockets(ctx traversal.StepContext, tv *traversal.GraphTraversalV) *SocketsTraversalStep {
 	if tv.Error() != nil {
 		return &SocketsTraversalStep{error: tv.Error()}
 	}
 
-	it := tv.GraphTraversal.CurrentStepContext().PaginationRange.Iterator()
+	it := ctx.PaginationRange.Iterator()
 
 	tv.GraphTraversal.RLock()
 	defer tv.GraphTraversal.RUnlock()

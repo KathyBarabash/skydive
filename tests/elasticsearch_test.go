@@ -32,8 +32,14 @@ import (
 	"github.com/skydive-project/skydive/common"
 	"github.com/skydive-project/skydive/filters"
 	es "github.com/skydive-project/skydive/storage/elasticsearch"
-	"github.com/skydive-project/skydive/tests/helper"
 )
+
+type fakeMasterElection struct {
+}
+
+func (f *fakeMasterElection) NewElection(name string) common.MasterElection {
+	return nil
+}
 
 func delTestIndex(name string) error {
 	req, err := http.NewRequest("DELETE", fmt.Sprintf("http://localhost:9200/skydive_%s*", name), nil)
@@ -50,7 +56,7 @@ func delTestIndex(name string) error {
 func getClient(t *testing.T, indices []es.Index, cfg es.Config) (*es.Client, error) {
 	es.SetRollingRate(5 * time.Second)
 
-	client, err := es.NewClient(indices, cfg, nil)
+	client, err := es.NewClient(indices, cfg, &fakeMasterElection{})
 	if err != nil {
 		return nil, err
 	}
@@ -71,7 +77,7 @@ func getClient(t *testing.T, indices []es.Index, cfg es.Config) (*es.Client, err
 }
 
 func TestRollingSimple(t *testing.T) {
-	if helper.TopologyBackend != "elasticsearch" && helper.FlowBackend != "elasticsearch" {
+	if topologyBackend != "elasticsearch" && flowBackend != "elasticsearch" {
 		t.Skip("Elasticsearch is used neither for topology nor flows")
 	}
 

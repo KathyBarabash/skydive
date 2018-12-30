@@ -33,7 +33,6 @@ import (
 	etcd "github.com/coreos/etcd/client"
 
 	"github.com/skydive-project/skydive/common"
-	"github.com/skydive-project/skydive/config"
 	shttp "github.com/skydive-project/skydive/http"
 	"github.com/skydive-project/skydive/logging"
 	"github.com/skydive-project/skydive/rbac"
@@ -43,10 +42,9 @@ import (
 
 // Server object are created once for each ServiceType (agent or analyzer)
 type Server struct {
-	HTTPServer  *shttp.Server
-	EtcdKeyAPI  etcd.KeysAPI
-	ServiceType common.ServiceType
-	handlers    map[string]Handler
+	HTTPServer *shttp.Server
+	EtcdKeyAPI etcd.KeysAPI
+	handlers   map[string]Handler
 }
 
 // Info for each host describes his API version and service (agent or analyzer)
@@ -66,7 +64,7 @@ func writeError(w http.ResponseWriter, status int, err error) {
 }
 
 // RegisterAPIHandler registers a new handler for an API
-func (a *Server) RegisterAPIHandler(handler Handler) error {
+func (a *Server) RegisterAPIHandler(handler Handler, authBackend shttp.AuthenticationBackend) error {
 	name := handler.Name()
 	title := strings.Title(name)
 
@@ -76,7 +74,7 @@ func (a *Server) RegisterAPIHandler(handler Handler) error {
 			Method: "GET",
 			Path:   "/api/" + name,
 			HandlerFunc: func(w http.ResponseWriter, r *auth.AuthenticatedRequest) {
-				if rbac.Enforce(r.Username, name, "read") == false {
+				if !rbac.Enforce(r.Username, name, "read") {
 					w.WriteHeader(http.StatusMethodNotAllowed)
 					return
 				}
@@ -90,7 +88,7 @@ func (a *Server) RegisterAPIHandler(handler Handler) error {
 				}
 
 				if err := json.NewEncoder(w).Encode(resources); err != nil {
-					logging.GetLogger().Criticalf("Failed to display %s: %s", name, err.Error())
+					logging.GetLogger().Criticalf("Failed to display %s: %s", name, err)
 				}
 			},
 		},
@@ -99,7 +97,7 @@ func (a *Server) RegisterAPIHandler(handler Handler) error {
 			Method: "GET",
 			Path:   shttp.PathPrefix(fmt.Sprintf("/api/%s/", name)),
 			HandlerFunc: func(w http.ResponseWriter, r *auth.AuthenticatedRequest) {
-				if rbac.Enforce(r.Username, name, "read") == false {
+				if !rbac.Enforce(r.Username, name, "read") {
 					w.WriteHeader(http.StatusMethodNotAllowed)
 					return
 				}
@@ -119,7 +117,7 @@ func (a *Server) RegisterAPIHandler(handler Handler) error {
 				w.WriteHeader(http.StatusOK)
 				handler.Decorate(resource)
 				if err := json.NewEncoder(w).Encode(resource); err != nil {
-					logging.GetLogger().Criticalf("Failed to display %s: %s", name, err.Error())
+					logging.GetLogger().Criticalf("Failed to display %s: %s", name, err)
 				}
 			},
 		},
@@ -128,7 +126,7 @@ func (a *Server) RegisterAPIHandler(handler Handler) error {
 			Method: "POST",
 			Path:   "/api/" + name,
 			HandlerFunc: func(w http.ResponseWriter, r *auth.AuthenticatedRequest) {
-				if rbac.Enforce(r.Username, name, "write") == false {
+				if !rbac.Enforce(r.Username, name, "write") {
 					w.WriteHeader(http.StatusMethodNotAllowed)
 					return
 				}
@@ -159,7 +157,7 @@ func (a *Server) RegisterAPIHandler(handler Handler) error {
 				w.Header().Set("Content-Type", "application/json; charset=UTF-8")
 				w.WriteHeader(http.StatusOK)
 				if _, err := w.Write(data); err != nil {
-					logging.GetLogger().Criticalf("Failed to create %s: %s", name, err.Error())
+					logging.GetLogger().Criticalf("Failed to create %s: %s", name, err)
 				}
 			},
 		},
@@ -168,7 +166,7 @@ func (a *Server) RegisterAPIHandler(handler Handler) error {
 			Method: "DELETE",
 			Path:   shttp.PathPrefix(fmt.Sprintf("/api/%s/", name)),
 			HandlerFunc: func(w http.ResponseWriter, r *auth.AuthenticatedRequest) {
-				if rbac.Enforce(r.Username, name, "write") == false {
+				if !rbac.Enforce(r.Username, name, "write") {
 					w.WriteHeader(http.StatusMethodNotAllowed)
 					return
 				}
@@ -189,7 +187,7 @@ func (a *Server) RegisterAPIHandler(handler Handler) error {
 		},
 	}
 
-	a.HTTPServer.RegisterRoutes(routes)
+	a.HTTPServer.RegisterRoutes(routes, authBackend)
 
 	if _, err := a.EtcdKeyAPI.Set(context.Background(), "/"+name, "", &etcd.SetOptions{Dir: true}); err != nil {
 		if _, err = a.EtcdKeyAPI.Get(context.Background(), "/"+name, nil); err != nil {
@@ -202,11 +200,11 @@ func (a *Server) RegisterAPIHandler(handler Handler) error {
 	return nil
 }
 
-func (a *Server) addAPIRootRoute() {
+func (a *Server) addAPIRootRoute(service common.Service, authBackend shttp.AuthenticationBackend) {
 	info := Info{
-		Host:    config.GetString("host_id"),
 		Version: version.Version,
-		Service: string(a.ServiceType),
+		Service: string(service.Type),
+		Host:    service.ID,
 	}
 
 	routes := []shttp.Route{
@@ -219,12 +217,12 @@ func (a *Server) addAPIRootRoute() {
 				w.WriteHeader(http.StatusOK)
 
 				if err := json.NewEncoder(w).Encode(&info); err != nil {
-					logging.GetLogger().Criticalf("Failed to display /api: %s", err.Error())
+					logging.GetLogger().Criticalf("Failed to display /api: %s", err)
 				}
 			},
 		}}
 
-	a.HTTPServer.RegisterRoutes(routes)
+	a.HTTPServer.RegisterRoutes(routes, authBackend)
 }
 
 // GetHandler returns the hander named hname
@@ -233,15 +231,14 @@ func (a *Server) GetHandler(hname string) Handler {
 }
 
 // NewAPI creates a new API server based on http
-func NewAPI(server *shttp.Server, kapi etcd.KeysAPI, serviceType common.ServiceType) (*Server, error) {
+func NewAPI(server *shttp.Server, kapi etcd.KeysAPI, service common.Service, authBackend shttp.AuthenticationBackend) (*Server, error) {
 	apiServer := &Server{
-		HTTPServer:  server,
-		EtcdKeyAPI:  kapi,
-		ServiceType: serviceType,
-		handlers:    make(map[string]Handler),
+		HTTPServer: server,
+		EtcdKeyAPI: kapi,
+		handlers:   make(map[string]Handler),
 	}
 
-	apiServer.addAPIRootRoute()
+	apiServer.addAPIRootRoute(service, authBackend)
 
 	return apiServer, nil
 }

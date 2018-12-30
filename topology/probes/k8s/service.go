@@ -25,82 +25,114 @@ package k8s
 import (
 	"fmt"
 
+	"github.com/skydive-project/skydive/graffiti/graph"
 	"github.com/skydive-project/skydive/logging"
 	"github.com/skydive-project/skydive/probe"
-	"github.com/skydive-project/skydive/topology/graph"
 
-	"k8s.io/api/core/v1"
-	"k8s.io/client-go/tools/cache"
+	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 )
 
-type serviceProbe struct {
-	defaultKubeCacheEventHandler
-	*kubeCache
-	graph *graph.Graph
+type serviceHandler struct {
 }
 
-func dumpService(srv *v1.Service) string {
-	return fmt.Sprintf("service{Name: %s}", srv.GetName())
+func (h *serviceHandler) Dump(obj interface{}) string {
+	srv := obj.(*v1.Service)
+	return fmt.Sprintf("service{Namespace: %s, Name: %s}", srv.Namespace, srv.Name)
 }
 
-func (p *serviceProbe) newMetadata(srv *v1.Service) graph.Metadata {
-	return newMetadata("service", srv.Namespace, srv.GetName(), srv)
+func (h *serviceHandler) Map(obj interface{}) (graph.Identifier, graph.Metadata) {
+	srv := obj.(*v1.Service)
+
+	m := NewMetadataFields(&srv.ObjectMeta)
+	m.SetFieldAndNormalize("Ports", srv.Spec.Ports)
+	m.SetFieldAndNormalize("ClusterIP", srv.Spec.ClusterIP)
+	m.SetFieldAndNormalize("ServiceType", srv.Spec.Type)
+	m.SetFieldAndNormalize("SessionAffinity", srv.Spec.SessionAffinity)
+	m.SetFieldAndNormalize("LoadBalancerIP", srv.Spec.LoadBalancerIP)
+	m.SetFieldAndNormalize("ExternalName", srv.Spec.ExternalName)
+
+	return graph.Identifier(srv.GetUID()), NewMetadata(Manager, "service", m, srv, srv.Name)
 }
 
-func serviceUID(srv *v1.Service) graph.Identifier {
-	return graph.Identifier(srv.GetUID())
+func newServiceProbe(client interface{}, g *graph.Graph) Subprobe {
+	return NewResourceCache(client.(*kubernetes.Clientset).Core().RESTClient(), &v1.Service{}, "services", g, &serviceHandler{})
 }
 
-func (p *serviceProbe) OnAdd(obj interface{}) {
-	if srv, ok := obj.(*v1.Service); ok {
-		p.graph.Lock()
-		defer p.graph.Unlock()
-
-		newNode(p.graph, serviceUID(srv), p.newMetadata(srv))
-		logging.GetLogger().Debugf("Added %s", dumpService(srv))
-	}
+type servicePodLinker struct {
+	graph        *graph.Graph
+	serviceCache *ResourceCache
+	podCache     *ResourceCache
 }
 
-func (p *serviceProbe) OnUpdate(oldObj, newObj interface{}) {
-	if srv, ok := newObj.(*v1.Service); ok {
-		p.graph.Lock()
-		defer p.graph.Unlock()
+func (spl *servicePodLinker) newEdgeMetadata() graph.Metadata {
+	m := NewEdgeMetadata(Manager, "association")
+	m.SetField("RelationType", "service")
+	return m
+}
 
-		if nsNode := p.graph.GetNode(serviceUID(srv)); nsNode != nil {
-			addMetadata(p.graph, nsNode, srv)
-			logging.GetLogger().Debugf("Updated %s", dumpService(srv))
+func (spl *servicePodLinker) GetABLinks(srvNode *graph.Node) (edges []*graph.Edge) {
+	if srv := spl.serviceCache.GetByNode(srvNode); srv != nil {
+		srv := srv.(*v1.Service)
+		labelSelector := &metav1.LabelSelector{MatchLabels: srv.Spec.Selector}
+		selectedPods := objectsToNodes(spl.graph, spl.podCache.getBySelector(spl.graph, srv.Namespace, labelSelector))
+		metadata := spl.newEdgeMetadata()
+		for _, podNode := range selectedPods {
+			id := graph.GenID(string(srvNode.ID), string(podNode.ID), "RelationType", "service")
+
+			edge, err := spl.graph.NewEdge(id, srvNode, podNode, metadata, "")
+			if err != nil {
+				logging.GetLogger().Error(err)
+				continue
+			}
+
+			edges = append(edges, edge)
 		}
 	}
+	return
 }
 
-func (p *serviceProbe) OnDelete(obj interface{}) {
-	if srv, ok := obj.(*v1.Service); ok {
-		p.graph.Lock()
-		defer p.graph.Unlock()
-
-		if nsNode := p.graph.GetNode(serviceUID(srv)); nsNode != nil {
-			p.graph.DelNode(nsNode)
-			logging.GetLogger().Debugf("Deleted %s", dumpService(srv))
+func (spl *servicePodLinker) GetBALinks(podNode *graph.Node) (edges []*graph.Edge) {
+	namespace, _ := podNode.GetFieldString(MetadataField("Namespace"))
+	name, _ := podNode.GetFieldString(MetadataField("Name"))
+	pod := spl.podCache.getByKey(namespace, name)
+	for _, srv := range spl.serviceCache.getByNamespace(namespace) {
+		srv := srv.(*v1.Service)
+		labelSelector := &metav1.LabelSelector{MatchLabels: srv.Spec.Selector}
+		if len(filterObjectsBySelector([]interface{}{pod}, labelSelector)) != 1 {
+			continue
+		}
+		if srvNode := spl.graph.GetNode(graph.Identifier(srv.GetUID())); srvNode != nil {
+			edges = append(edges, spl.graph.CreateEdge("", srvNode, podNode, spl.newEdgeMetadata(), graph.TimeUTC(), ""))
 		}
 	}
+	return
 }
 
-func (p *serviceProbe) Start() {
-	p.kubeCache.Start()
-}
-
-func (p *serviceProbe) Stop() {
-	p.kubeCache.Stop()
-}
-
-func newServiceKubeCache(handler cache.ResourceEventHandler) *kubeCache {
-	return newKubeCache(getClientset().Core().RESTClient(), &v1.Service{}, "services", handler)
-}
-
-func newServiceProbe(g *graph.Graph) probe.Probe {
-	p := &serviceProbe{
-		graph: g,
+func newServicePodLinker(g *graph.Graph) probe.Probe {
+	serviceProbe := GetSubprobe(Manager, "service")
+	podProbe := GetSubprobe(Manager, "pod")
+	if serviceProbe == nil || podProbe == nil {
+		return nil
 	}
-	p.kubeCache = newServiceKubeCache(p)
-	return p
+
+	rl := graph.NewResourceLinker(
+		g,
+		[]graph.ListenerHandler{serviceProbe},
+		[]graph.ListenerHandler{podProbe},
+		&servicePodLinker{
+			graph:        g,
+			serviceCache: serviceProbe.(*ResourceCache),
+			podCache:     podProbe.(*ResourceCache),
+		},
+		graph.Metadata{"RelationType": "service"},
+	)
+
+	linker := &Linker{
+		ResourceLinker: rl,
+	}
+	rl.AddEventListener(linker)
+
+	return linker
 }

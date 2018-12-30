@@ -28,6 +28,9 @@ except ImportError:
 
 from skydive.auth import Authenticate
 from skydive.graph import Node, Edge
+from skydive.rules import NodeRule, EdgeRule
+from skydive.alerts import Alert
+from skydive.captures import Capture
 
 
 class BadRequest(Exception):
@@ -36,7 +39,7 @@ class BadRequest(Exception):
 
 class RESTClient:
     def __init__(self, endpoint, scheme="http",
-                 username="", password="",
+                 username="", password="", cookies={},
                  insecure=False, debug=0):
         self.endpoint = endpoint
         self.scheme = scheme
@@ -44,9 +47,10 @@ class RESTClient:
         self.password = password
         self.insecure = insecure
         self.debug = debug
+        self.cookies = cookies
 
-        self.auth = Authenticate(endpoint, scheme,
-                                 username, password, insecure)
+        self.auth = Authenticate(endpoint, scheme, username,
+                                 password, cookies, insecure)
 
     def request(self, path, method="GET", data=None):
         if self.username and not self.auth.authenticated:
@@ -71,6 +75,8 @@ class RESTClient:
             encoded_data = None
 
         opener = request.build_opener(*handlers)
+        for k, v in self.cookies.items():
+            opener.append = (k, v)
 
         headers = {'Content-Type': 'application/json'}
         req = request.Request(url,
@@ -113,15 +119,89 @@ class RESTClient:
     def lookup_edges(self, gremlin):
         return self.lookup(gremlin, Edge)
 
-    def capture_create(self, query):
-        data = json.dumps(
-            {"GremlinQuery": query}
-        )
-        return self.request("/api/capture", method="POST", data=data)
+    def capture_create(self, query, name="", description="",
+                       extra_tcp_metric=False, ip_defrag=False,
+                       reassemble_tcp=False, layer_key_mode="L2"):
+        data = {
+            "GremlinQuery": query,
+            "LayerKeyMode": layer_key_mode,
+        }
+
+        if name:
+            data["Name"] = name
+        if description:
+            data["Description"] = description
+        if extra_tcp_metric:
+            data["ExtraTCPMetric"] = True
+        if ip_defrag:
+            data["IPDefrag"] = True
+        if reassemble_tcp:
+            data["ReassembleTCP"] = True
+
+        c = self.request("/api/capture", method="POST", data=json.dumps(data))
+        return Capture.from_object(c)
 
     def capture_list(self):
-        return self.request("/api/capture")
+        objs = self.request("/api/capture")
+        return [Capture.from_object(o) for o in objs.values()]
 
     def capture_delete(self, capture_id):
         path = "/api/capture/%s" % capture_id
         return self.request(path, method="DELETE")
+
+    def alert_create(self, action, expression, trigger="graph"):
+        data = json.dumps(
+            {
+                "Action": action,
+                "Expression": expression,
+                "Trigger": trigger
+            }
+        )
+        a = self.request("/api/alert", method="POST", data=data)
+        return Alert.from_object(a)
+
+    def alert_list(self):
+        objs = self.request("/api/alert")
+        return [Alert.from_object(o) for o in objs.values()]
+
+    def alert_delete(self, alert_id):
+        path = "/api/alert/%s" % alert_id
+        return self.request(path, method="DELETE")
+
+    def noderule_create(self, action, metadata=None, query=""):
+        data = json.dumps(
+            {
+                "Action": action,
+                "Metadata": metadata,
+                "Query": query
+            }
+        )
+        r = self.request("/api/noderule", method="POST", data=data)
+        return NodeRule.from_object(r)
+
+    def noderule_list(self):
+        objs = self.request("/api/noderule")
+        return [NodeRule.from_object(o) for o in objs]
+
+    def noderule_delete(self, rule_id):
+        path = "/api/noderule/%s" % rule_id
+        return self.request(path, method="DELETE")
+
+    def edgerule_create(self, src, dst, metadata):
+        data = json.dumps(
+            {
+                "Src": src,
+                "Dst": dst,
+                "Metadata": metadata
+            }
+        )
+        r = self.request("/api/edgerule", method="POST", data=data)
+        return EdgeRule.from_object(r)
+
+    def edgerule_list(self):
+        objs = self.request("/api/edgerule")
+        return [EdgeRule.from_object(o) for o in objs]
+
+    def edgerule_delete(self, rule_id):
+        path = "/api/edgerule/%s" % rule_id
+        self.request(path, method="DELETE")

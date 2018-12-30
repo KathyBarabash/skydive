@@ -23,6 +23,7 @@
 package client
 
 import (
+	"fmt"
 	"io/ioutil"
 	"os"
 
@@ -43,7 +44,7 @@ var (
 	workflowPath string
 )
 
-// WorkflowCmd workflow root command
+// WorkflowCmd describe the "workflow" root command
 var WorkflowCmd = &cobra.Command{
 	Use:          "workflow",
 	Short:        "Manage workflows",
@@ -74,7 +75,7 @@ func loadWorklow(path string) (*types.Workflow, error) {
 	return workflow, nil
 }
 
-// WorkflowCreate workflow create command
+// WorkflowCreate describes the "workflow create" command
 var WorkflowCreate = &cobra.Command{
 	Use:          "create",
 	Short:        "create workflow",
@@ -85,25 +86,22 @@ var WorkflowCreate = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		client, err := client.NewCrudClientFromConfig(&AuthenticationOpts)
 		if err != nil {
-			logging.GetLogger().Error(err)
-			os.Exit(1)
+			exitOnError(err)
 		}
 
 		workflow, err := loadWorklow(workflowPath)
 		if err != nil {
-			logging.GetLogger().Error(err)
-			os.Exit(1)
+			exitOnError(err)
 		}
 
 		if err := client.Create("workflow", &workflow); err != nil {
-			logging.GetLogger().Error(err)
-			os.Exit(1)
+			exitOnError(err)
 		}
 		printJSON(workflow)
 	},
 }
 
-// WorkflowDelete workflow delete command
+// WorkflowDelete describes the "workflow delete" command
 var WorkflowDelete = &cobra.Command{
 	Use:          "delete",
 	Short:        "delete workflow",
@@ -118,8 +116,7 @@ var WorkflowDelete = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		client, err := client.NewCrudClientFromConfig(&AuthenticationOpts)
 		if err != nil {
-			logging.GetLogger().Critical(err)
-			os.Exit(1)
+			exitOnError(err)
 		}
 
 		for _, id := range args {
@@ -130,7 +127,7 @@ var WorkflowDelete = &cobra.Command{
 	},
 }
 
-// Workflow workflow list command
+// WorkflowList describes the "workflow list" command
 var WorkflowList = &cobra.Command{
 	Use:          "list",
 	Short:        "List workflows",
@@ -140,19 +137,17 @@ var WorkflowList = &cobra.Command{
 		var workflows map[string]types.Workflow
 		client, err := client.NewCrudClientFromConfig(&AuthenticationOpts)
 		if err != nil {
-			logging.GetLogger().Error(err)
-			os.Exit(1)
+			exitOnError(err)
 		}
 
 		if err := client.List("workflow", &workflows); err != nil {
-			logging.GetLogger().Error(err)
-			os.Exit(1)
+			exitOnError(err)
 		}
 		printJSON(workflows)
 	},
 }
 
-// Workflow workflow call command
+// WorkflowCall describes the "workflow call" command
 var WorkflowCall = &cobra.Command{
 	Use:          "call workflow",
 	Short:        "Call workflow",
@@ -168,28 +163,24 @@ var WorkflowCall = &cobra.Command{
 		var workflow types.Workflow
 		client, err := client.NewCrudClientFromConfig(&AuthenticationOpts)
 		if err != nil {
-			logging.GetLogger().Error(err)
-			os.Exit(1)
+			exitOnError(err)
 		}
 
 		if err := client.Get("workflow", args[0], &workflow); err != nil {
-			logging.GetLogger().Error(err)
-			os.Exit(1)
+			exitOnError(err)
 		}
 
-		jsre, err := js.NewJSRE()
+		runtime, err := js.NewRuntime()
 		if err != nil {
-			logging.GetLogger().Error(err)
-			os.Exit(1)
+			exitOnError(err)
 		}
 
-		jsre.Start()
-		jsre.RegisterAPIClient(client)
+		runtime.Start()
+		runtime.RegisterAPIClient(client)
 
-		result, err := jsre.Exec("(" + workflow.Source + ")")
+		result, err := runtime.Exec("(" + workflow.Source + ")")
 		if err != nil {
-			logging.GetLogger().Errorf("Error while compile workflow %s: %s", workflow.Source, result.String())
-			os.Exit(1)
+			exitOnError(fmt.Errorf("Error while compile workflow %s: %s", workflow.Source, result.String()))
 		}
 
 		params := make([]interface{}, len(args)-1)
@@ -199,19 +190,17 @@ var WorkflowCall = &cobra.Command{
 
 		result, err = result.Call(result, params...)
 		if err != nil {
-			logging.GetLogger().Errorf("Error while executing workflow: %s", result.String())
-			os.Exit(1)
+			exitOnError(fmt.Errorf("Error while executing workflow: %s", result.String()))
 		}
 
 		if !result.IsObject() {
-			logging.GetLogger().Errorf("Workflow is expected to return a promise, returned %s", result.Class())
-			os.Exit(1)
+			exitOnError(fmt.Errorf("Workflow is expected to return a promise, returned %s", result.Class()))
 		}
 
 		done := make(chan otto.Value)
 		promise := result.Object()
 
-		finally, err := jsre.ToValue(func(call otto.FunctionCall) otto.Value {
+		finally, err := runtime.ToValue(func(call otto.FunctionCall) otto.Value {
 			result := call.Argument(0)
 			done <- result
 			return result
@@ -223,8 +212,8 @@ var WorkflowCall = &cobra.Command{
 
 		result = <-done
 
-		jsre.Set("result", result)
-		jsre.Exec("console.log(JSON.stringify(result))")
+		runtime.Set("result", result)
+		runtime.Exec("console.log(JSON.stringify(result))")
 	},
 }
 

@@ -39,6 +39,7 @@ var OTHER_PORTS = -4;
 var SAME_PORT = -5;
 var reFindInport = new RegExp('(^|.*,)in_port=([0-9]*)(,.*|$)');
 var reFindPriority = new RegExp('^priority=([0-9]*),?(.*|$)');
+var reBucket = new RegExp('^bucket_id:([0-9]*),?(.*$)');
 var reSplit = new RegExp('[:();]');
 /** Translation from OVS syntax to summary actions */
 var actionTable = {
@@ -142,6 +143,31 @@ function summarizeFilter(rule) {
 function summarize(rule) {
   summarizeFilter(rule);
   summarizeActions(rule);
+}
+
+function parseBucket(input) {
+  var matched = reBucket.exec(input);
+  if (matched) {
+    return {id: matched[1], content: matched[2]};
+  }
+  return null;
+}
+
+/** Computes the summary of a group node.
+ *
+ * The main action is to parse the buckets and isolate additional information
+ * as the selection algorithm (assumed before the first bucket)
+ */
+function summarizeGroup(group) {
+  var rawBuckets = group.contents.split('bucket=')
+  for(var i=0; i < rawBuckets.length; i++) {
+    var b = rawBuckets[i];
+    if (b.charAt(b.length - 1) == ',') {
+      rawBuckets[i] = b.slice(0, -1);
+    }
+    group.additional = rawBuckets[0];
+    group.buckets = rawBuckets.slice(1).map(parseBucket);
+  }
 }
 
 /** Compare two openflow rules by priority and then action.
@@ -255,8 +281,9 @@ var BridgeLayout = (function () {
    * @param graph the global graph hosting the bridge
    * @param bridge the bridge node whose rules are represented.
    */
-  function BridgeLayout(graph, bridge, store) {
+  function BridgeLayout(graph, filtered, bridge, store) {
     this.graph = graph;
+    this.filtered = filtered;
     this.bridge = bridge;
     this.store = store;
     this.compute();
@@ -266,6 +293,9 @@ var BridgeLayout = (function () {
   BridgeLayout.prototype.extract = function () {
     var itfs = {};
     var rules = [];
+    var rulesUUID = new Set();       // added on check tests, by p.c.
+    var groupsUUID = new Set();
+    var groups = [];
     var children = this.graph.getTargets(this.bridge);
     for (var i = 0; i < children.length; i++) {
       var c = children[i];
@@ -277,18 +307,29 @@ var BridgeLayout = (function () {
           break;
         case 'ofrule':
           var rule = c.metadata;
+          if (this.filtered != null && ! (this.filtered.includes(rule.UUID))) continue;
           summarize(rule);
           rules.push(rule);
+          rulesUUID.add(rule.UUID);
+          break;
+        case 'ofgroup':
+          var group = c.metadata;
+          summarizeGroup(group);
+          groups.push(group);
+          groupsUUID.add(group.UUID);
+
       }
     }
     this.rules = rules;
+    this.groups = groups;
     this.interfaces = itfs;
+    this.rulesUUID = rulesUUID;
+    this.groupsUUID = groupsUUID;
   };
 
   /** Structure the information on the rules, classifying by tables and ports. */
   BridgeLayout.prototype.structure = function () {
-    var perTableRules =
-      classify(this.rules, function (r) { return r.table; });
+    var perTableRules = classify(this.rules, function (r) { return r.table; });
     this.structured = {};
     for (var key in perTableRules) {
       var array = perTableRules[key];
@@ -325,6 +366,7 @@ var BridgeLayout = (function () {
    */
   BridgeLayout.prototype.mark = function(p) {
     var nodes = this.interfaces[p];
+    if (nodes === undefined) return;
     for (var i = 0; i < nodes.length; i++) {
       this.store.commit('highlight', nodes[i].id);
     }
@@ -335,6 +377,7 @@ var BridgeLayout = (function () {
    */
   BridgeLayout.prototype.unmark = function(p) {
     var nodes = this.interfaces[p];
+    if (nodes === undefined) return;
     for (var i = 0; i < nodes.length; i++) {
       this.store.commit('unhighlight', nodes[i].id);
     }
@@ -412,42 +455,42 @@ Vue.component('rule-table-detail', {
     <div class="dynamic-table">\
       <table class="table table-bordered table-condensed">\
         <thead>\
-            <tr>\
-                <th class="priority-column">priority</th>\
-                <th class="filters-column">filters</th>\
-                <th class="summary-column">summary</th>\
-                <th class="actions-column">actions</th>\
-            </tr>\
+          <tr>\
+            <th class="priority-column">priority</th>\
+            <th class="filters-column">filters</th>\
+            <th class="summary-column">summary</th>\
+            <th class="actions-column">actions</th>\
+          </tr>\
         </thead>\
         <tbody>\
-            <tr v-for="rule in rules"\
-                :id="\'R-\' + rule.UUID"\
-                v-bind:class="{soft: layout.isHighlighted(rule)}">\
-                <td v-if="rule.prioritySpan != -1" :rowspan="rule.prioritySpan">\
-                  {{rule.priority}}\
-                </td>\
-                <td>\
-                  {{ splitLine(rule.filters) }}\
-                </td>\
-                <td v-if="rule.actionsSpan != -1" :rowspan="rule.actionsSpan">\
-                    <table>\
-                        <tr v-for="act in rule.outAction">\
-                            <td>\
-                              <i :class="layout.clazz(act.action)"></i>\
-                            </td>\
-                            <td v-on:mouseover="layout.mark(act.port)"\
-                                v-on:mouseleave="layout.unmark(act.port)"\
-                                v-on:click="layout.select(act.port)">\
-                                <span class="port-link">{{layout.portname(act.port)}}</span>\
-                            </td>\
-                            <td><a class="table-link" v-on:click="layout.switchTab(act.table)">{{act.table}}</a></td>\
-                        </tr>\
-                    </table>\
-                </td>\
-                <td v-if="rule.actionsSpan != -1" :rowspan="rule.actionsSpan">\
-                  {{ splitLine(rule.actions) }}\
-                </td>\
-            </tr>\
+          <tr v-for="rule in rules"\
+            :id="\'R-\' + rule.UUID"\
+            v-bind:class="{soft: layout.isHighlighted(rule)}">\
+            <td v-if="rule.prioritySpan != -1" :rowspan="rule.prioritySpan">\
+              {{rule.priority}}\
+            </td>\
+            <td>\
+              {{ splitLine(rule.filters) }}\
+            </td>\
+            <td v-if="rule.actionsSpan != -1" :rowspan="rule.actionsSpan">\
+              <table class="inner-table">\
+                <tr v-for="act in rule.outAction">\
+                  <td>\
+                    <i :class="layout.clazz(act.action)"></i>\
+                  </td>\
+                  <td v-on:mouseover="layout.mark(act.port)"\
+                    v-on:mouseleave="layout.unmark(act.port)"\
+                    v-on:click="layout.select(act.port)">\
+                    <span class="port-link">{{layout.portname(act.port)}}</span>\
+                  </td>\
+                  <td><a class="table-link" v-on:click="layout.switchTab(act.table)">{{act.table}}</a></td>\
+                </tr>\
+              </table>\
+            </td>\
+            <td v-if="rule.actionsSpan != -1" :rowspan="rule.actionsSpan">\
+              {{ splitLine(rule.actions) }}\
+            </td>\
+          </tr>\
         </tbody>\
       </table>\
     </div>',
@@ -476,62 +519,143 @@ Vue.component('rule-table-detail', {
   }
 });
 
+/** Graphical component for group table */
+Vue.component('groups-detail', {
+  template: '\
+    <div class="group-detail" v-if="Object.keys(layout.groups).length > 0">\
+      <ul class="nav nav-pills" role="tablist">\
+        <li>\
+          <span style="display: block;padding: 10px 10px;font-weight: bold;">Group</span>\
+        </li>\
+        <li :class="{ active: index==0 }"\
+          v-for="(group, index) in layout.groups">\
+          <a data-toggle="tab"\
+            role="tab"\
+            :href="\'#G\' + group.group_id">{{group.group_id}}</a>\
+        </li>\
+      </ul>\
+      <div class="groups">\
+        <div class="tab-content clearfix">\
+          <div :class="{ active: index==0 }"\
+            class="tab-pane"\
+            :id="\'G\' + group.group_id"\
+            role="tabpanel"\
+            v-for="(group, index) in layout.groups">\
+            <div class="object-detail">\
+              <div class="object-key-value">\
+                <span class="object-key">Type</span>: \
+                <span class="object-detail">{{group.group_type}}</span>\
+              </div>\
+              <div class="object-key-value">\
+                <span class="object-key">Additional</span>: \
+                <span class="object-detail">{{group.additional}}</span>\
+              </div>\
+            </div>\
+            <div class="dynamic-table">\
+              <table class="table table-bordered table-condensed">\
+                <thead>\
+                  <tr>\
+                    <th class="id">id</th>\
+                    <th class="content">content</th>\
+                  </tr>\
+                </thead>\
+                <tbody>\
+                  <tr v-for="bucket in group.buckets"\
+                    :id="\'GB-\' + group.UUID + \'-\' + bucket.id">\
+                    <td>{{bucket.id}}</td>\
+                    <td>{{bucket.content}}</td>\
+                  </tr>\
+                </tbody>\
+              </table>\
+            </div>\
+          </div>\
+        </div>\
+      </div>\
+    </div>\
+  ',
+  props: {
+    layout: {
+      type: Object,
+      required: true
+    }
+  },
+});
+
+
 /** Vue component showing the rules associated to a bridge */
 Vue.component('rule-detail', {
+
+  mixins: [apiMixin],
+
   template: '\
-<div class="rules-detail flow-ops-panel" v-if="Object.keys(layout.structured).length > 0">\
+    <div class="rules-detail flow-ops-panel">\
       <ul class="nav nav-pills"\
-          role="tablist">\
+        role="tablist">\
         <li>\
           <span style="display: block;padding: 10px 10px;font-weight: bold;">Table</span>\
         </li>\
         <li :class="{ active: (tidx==0) }"\
-            v-for="(table, tname, tidx) in layout.structured">\
-            <a data-toggle="tab"\
-                role="tab"\
-                :href="\'#T\' + tname">{{tname}}</a>\
+          v-for="(table, tname, tidx) in layout.structured">\
+          <a data-toggle="tab"\
+            role="tab"\
+            :href="\'#T\' + tname">{{tname}}</a>\
         </li>\
       </ul>\
-    <div class="rules">\
-      <div class="tab-content clearfix">\
+      <div class="rules">\
+        <div class="tab-content clearfix">\
           <div :class="{ active: (tidx==0) }"\
-              class="tab-pane"\
-              :id="\'T\' + tname"\
-              role="tabpanel"\
-              v-for="(table, tname, tidx) in layout.structured">\
-  \
-              <div class="container-fluid" v-if="Object.keys(table.ports).length > 0">\
-                <div class="navbar-header">\
-                  <span class="navbar-brand"> Port </span>\
-                </div>\
-                <ul class="nav nav-pills"\
-                    role="tablist">\
-                    <li :class="{ active: (pidx==0) }"\
-                        v-for="(rules,port,pidx) in table.ports"\
-                        v-on:mouseover="layout.mark(port)"\
-                        v-on:mouseleave="layout.unmark(port)">\
-                        <a data-toggle="tab"\
-                            role="tab"\
-                            :href="\'#P\' + tname + \'-\' + port">{{layout.portname(port)}}</a>\
-                    </li>\
-                </ul>\
+            class="tab-pane"\
+            :id="\'T\' + tname"\
+            role="tabpanel"\
+            v-for="(table, tname, tidx) in layout.structured">\
+            <div class="container-fluid" v-if="Object.keys(table.ports).length > 0">\
+              <div class="navbar-header">\
+                <span class="navbar-brand"> Port </span>\
               </div>\
-              <div class="tab-content"\
-                  v-if="Object.keys(table.ports).length > 0">\
-                  <div :class="{ active: (pidx==0) }"\
-                      class="tab-pane"\
-                      :id="\'P\' + tname + \'-\' + port"\
-                      role="tabpanel"\
-                      v-for="(rules, port, pidx) in table.ports">\
-                      <rule-table-detail :rules="rules" :layout="layout"/>\
-                  </div>\
+              <ul class="nav nav-pills"\
+                role="tablist">\
+                <li :class="{ active: (pidx==0) }"\
+                  v-for="(rules,port,pidx) in table.ports"\
+                  v-on:mouseover="layout.mark(port)"\
+                  v-on:mouseleave="layout.unmark(port)">\
+                  <a data-toggle="tab"\
+                    role="tab"\
+                    :href="\'#P\' + tname + \'-\' + port">{{layout.portname(port)}}</a>\
+                </li>\
+              </ul>\
+            </div>\
+            <div class="tab-content">\
+              <div :class="{ active: (pidx==0) }"\
+                class="tab-pane"\
+                :id="\'P\' + tname + \'-\' + port"\
+                role="tabpanel"\
+                v-for="(rules, port, pidx) in table.ports">\
+                <rule-table-detail :rules="rules" :layout="layout"/>\
               </div>\
-              <rule-table-detail :rules="table.any" :layout="layout"/>\
+            </div>\
+            <rule-table-detail :rules="table.any" :layout="layout"/>\
           </div>\
+          <rule-table-detail v-if="Object.keys(layout.structured).length == 0" />\
+          <div class="dynamic-table">\
+            <div class="dynamic-table-actions">\
+              <filter-selector :query="value"\
+                :filters="filters"\
+                @add="addFilter"\
+                @remove="removeFilter"></filter-selector>\
+            </div>\
+          </div>\
+        </div>\
+      </div>\
+      <div>\
+        <groups-detail :layout="layout"/>\
       </div>\
     </div>\
-</div>\
   ',
+
+  components: {
+    'filter-selector': FilterSelector
+  },
+
   props: {
     bridge: {
       type: Object,
@@ -544,13 +668,18 @@ Vue.component('rule-detail', {
   },
 
   data: function() {
-    return { memoBridgeLayout:null };
+    return {
+      value: "",
+      memoBridgeLayout:null,
+      filters: {},
+      filtered: null
+    };
   },
 
   computed: {
     layout: function () {
       if (! this.memoBridgeLayout || this.memoBridgeLayout.bridge !== this.bridge) {
-        this.memoBridgeLayout = new BridgeLayout(this.graph, this.bridge, this.$store);
+        this.memoBridgeLayout = new BridgeLayout(this.graph, this.filtered, this.bridge, this.$store);
         this.memoBridgeLayout.switchTab(0);
       }
       return this.memoBridgeLayout;
@@ -566,15 +695,28 @@ Vue.component('rule-detail', {
     var self = this;
     var handle = function(e) {
       if (! self.bridge) return;
-      if (e.target.metadata.Type === 'ofrule' && e.source.id == self.bridge.id ) {
+      var tgtType = e.target.metadata.Type;
+      if (tgtType === 'ofrule'  && e.source.id == self.bridge.id ) {
+        self.getRules();
+      } else if (tgtType === 'ofgroup'  && e.source.id == self.bridge.id ) {
         self.memoBridgeLayout = null;
+      }
+    };
+
+    var handleUpdate = function(n) {
+      if ((n.metadata.Type == 'ofgroup' && self.memoBridgeLayout.groupsUUID.has(n.metadata.UUID)) ||
+          (n.metadata.Type == 'ofrule' && self.memoBridgeLayout.rulesUUID.has(n.metadata.UUID))) {
+            self.memoBridgeLayout = null;
       }
     };
     this.handler = {
       onEdgeAdded: handle,
-      onEdgeDeleted: handle
+      onEdgeDeleted: handle,
+      onNodeUpdated:handleUpdate
     };
     this.graph.addHandler(this.handler);
+    this.getRules();
+    var self = this;
     this.unwatch = this.$store.watch(
       function () {
         return self.$store.state.currentRule;
@@ -591,5 +733,48 @@ Vue.component('rule-detail', {
         }
       }
     )
+  },
+
+  methods: {
+    addFilter: function(key, value) {
+      if (!this.filters[key]) {
+        Vue.set(this.filters, key, []);
+      }
+      this.filters[key].push(value);
+      this.getRules();
+    },
+
+    removeFilter: function(key, index) {
+      this.filters[key].splice(index, 1);
+      if (this.filters[key].length === 0) {
+        Vue.delete(this.filters, key);
+      }
+      this.getRules();
+    },
+    getRules: function() {
+      var self = this;
+      console.log(this.filters);
+      var keys = Object.keys(this.filters);
+      if(keys.length == 0) {
+        // Short cut no filter.
+        this.filtered = null;
+        this.memoBridgeLayout = null;
+        return;
+      }
+      var queryRules = "G.V('" + self.bridge.id + "').Out().Has('Type', 'ofrule')";
+      var query = "";
+      for (var k in this.filters) {
+        var valList = this.filters[k];
+        var regex = valList.length == 1 ? valList[0] : '(' + valList.join('|') + ')';
+        query += queryRules + ".Has('filters', regex('.*" + k + "=" + regex + ".*')).As('" + k + "').";
+      }
+      query += "Select('" + keys.join("', '") + "')";
+      console.log(query);
+      this.$topologyQuery(query)
+        .then(function(r) {
+          self.filtered = r.map(function(node) {return node.Metadata.UUID});
+          self.memoBridgeLayout = null;
+        });
+    }
   }
 });

@@ -26,8 +26,8 @@ package probes
 import (
 	"github.com/skydive-project/skydive/api/types"
 	"github.com/skydive-project/skydive/common"
+	"github.com/skydive-project/skydive/graffiti/graph"
 	"github.com/skydive-project/skydive/probe"
-	"github.com/skydive-project/skydive/topology/graph"
 )
 
 // OvsMirrorProbesHandler describes a flow probe handle in the graph
@@ -53,6 +53,6 @@ func (p *OvsMirrorProbesHandler) Stop() {
 }
 
 // NewOvsMirrorProbesHandler creates a new OVS Mirror probes
-func NewOvsMirrorProbesHandler(g *graph.Graph, tb, fb *probe.ProbeBundle) (*OvsMirrorProbesHandler, error) {
+func NewOvsMirrorProbesHandler(g *graph.Graph, tb, fb *probe.Bundle) (*OvsMirrorProbesHandler, error) {
 	return nil, common.ErrNotImplemented
 }

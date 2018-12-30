@@ -35,9 +35,9 @@ import (
 	lxd "github.com/lxc/lxd/client"
 	"github.com/mitchellh/mapstructure"
 	"github.com/skydive-project/skydive/common"
+	"github.com/skydive-project/skydive/graffiti/graph"
 	"github.com/skydive-project/skydive/logging"
 	"github.com/skydive-project/skydive/topology"
-	"github.com/skydive-project/skydive/topology/graph"
 	ns "github.com/skydive-project/skydive/topology/probes/netns"
 	"github.com/vishvananda/netns"
 )
@@ -72,10 +72,10 @@ type loggingEvent struct {
 	} `mapstructure:"metadata"`
 }
 
-// LxdProbe describes a LXD topology graph that enhance the graph
-type LxdProbe struct {
+// Probe describes a LXD topology graph that enhance the graph
+type Probe struct {
 	common.RWMutex
-	*ns.NetNSProbe
+	*ns.Probe
 	state        int64
 	wg           sync.WaitGroup
 	connected    atomic.Value
@@ -85,11 +85,11 @@ type LxdProbe struct {
 	client       lxd.ContainerServer
 }
 
-func (probe *LxdProbe) containerNamespace(pid int) string {
+func (probe *Probe) containerNamespace(pid int) string {
 	return fmt.Sprintf("/proc/%d/ns/net", pid)
 }
 
-func (probe *LxdProbe) registerContainer(id string) {
+func (probe *Probe) registerContainer(id string) {
 	logging.GetLogger().Debugf("Registering container %s", id)
 
 	probe.Lock()
@@ -153,11 +153,15 @@ func (probe *LxdProbe) registerContainer(id string) {
 
 	probe.Graph.Lock()
 
-	containerNode := probe.Graph.NewNode(graph.GenID(), graph.Metadata{
+	containerNode, err := probe.Graph.NewNode(graph.GenID(), graph.Metadata{
 		"Type": "container",
 		"Name": id,
 		"LXD":  metadata,
 	})
+	if err != nil {
+		logging.GetLogger().Error(err)
+		return
+	}
 
 	topology.AddOwnershipLink(probe.Graph, n, containerNode, nil)
 	probe.Graph.Unlock()
@@ -168,7 +172,7 @@ func (probe *LxdProbe) registerContainer(id string) {
 	}
 }
 
-func (probe *LxdProbe) unregisterContainer(id string) {
+func (probe *Probe) unregisterContainer(id string) {
 	probe.Lock()
 	defer probe.Unlock()
 
@@ -178,7 +182,9 @@ func (probe *LxdProbe) unregisterContainer(id string) {
 	}
 
 	probe.Graph.Lock()
-	probe.Graph.DelNode(infos.Node)
+	if err := probe.Graph.DelNode(infos.Node); err != nil {
+		logging.GetLogger().Error(err)
+	}
 	probe.Graph.Unlock()
 
 	namespace := probe.containerNamespace(infos.Pid)
@@ -187,7 +193,7 @@ func (probe *LxdProbe) unregisterContainer(id string) {
 	delete(probe.containerMap, id)
 }
 
-func (probe *LxdProbe) connect() (err error) {
+func (probe *Probe) connect() (err error) {
 	if probe.hostNs, err = netns.Get(); err != nil {
 		return err
 	}
@@ -254,7 +260,7 @@ func (probe *LxdProbe) connect() (err error) {
 }
 
 // Start the probe
-func (probe *LxdProbe) Start() {
+func (probe *Probe) Start() {
 	if !atomic.CompareAndSwapInt64(&probe.state, common.StoppedState, common.RunningState) {
 		return
 	}
@@ -276,7 +282,7 @@ func (probe *LxdProbe) Start() {
 }
 
 // Stop the probe
-func (probe *LxdProbe) Stop() {
+func (probe *Probe) Stop() {
 	if !atomic.CompareAndSwapInt64(&probe.state, common.RunningState, common.StoppingState) {
 		return
 	}
@@ -289,10 +295,10 @@ func (probe *LxdProbe) Stop() {
 	atomic.StoreInt64(&probe.state, common.StoppedState)
 }
 
-// NewLxdProbe creates a new topology Lxd probe
-func NewLxdProbe(nsProbe *ns.NetNSProbe, lxdURL string) (*LxdProbe, error) {
-	probe := &LxdProbe{
-		NetNSProbe:   nsProbe,
+// NewProbe creates a new topology Lxd probe
+func NewProbe(nsProbe *ns.Probe, lxdURL string) (*Probe, error) {
+	probe := &Probe{
+		Probe:        nsProbe,
 		state:        common.StoppedState,
 		containerMap: make(map[string]containerInfo),
 		quit:         make(chan struct{}),

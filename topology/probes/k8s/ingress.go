@@ -25,82 +25,36 @@ package k8s
 import (
 	"fmt"
 
-	"github.com/skydive-project/skydive/logging"
+	"github.com/skydive-project/skydive/graffiti/graph"
 	"github.com/skydive-project/skydive/probe"
-	"github.com/skydive-project/skydive/topology/graph"
 
 	"k8s.io/api/extensions/v1beta1"
-	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/kubernetes"
 )
 
-type ingressProbe struct {
-	defaultKubeCacheEventHandler
-	*kubeCache
-	graph *graph.Graph
+type ingressHandler struct {
 }
 
-func dumpIngress(ingress *v1beta1.Ingress) string {
-	return fmt.Sprintf("ingress{Name: %s}", ingress.GetName())
+func (h *ingressHandler) Dump(obj interface{}) string {
+	ingress := obj.(*v1beta1.Ingress)
+	return fmt.Sprintf("ingress{Namespace: %s, Name: %s}", ingress.Namespace, ingress.Name)
 }
 
-func (p *ingressProbe) newMetadata(ingress *v1beta1.Ingress) graph.Metadata {
-	return newMetadata("ingress", ingress.Namespace, ingress.GetName(), ingress)
+func (h *ingressHandler) Map(obj interface{}) (graph.Identifier, graph.Metadata) {
+	ingress := obj.(*v1beta1.Ingress)
+
+	m := NewMetadataFields(&ingress.ObjectMeta)
+	m.SetFieldAndNormalize("Backend", ingress.Spec.Backend)
+	m.SetFieldAndNormalize("TLS", ingress.Spec.TLS)
+	m.SetFieldAndNormalize("Rules", ingress.Spec.Rules)
+
+	return graph.Identifier(ingress.GetUID()), NewMetadata(Manager, "ingress", m, ingress, ingress.Name)
 }
 
-func ingressUID(ingress *v1beta1.Ingress) graph.Identifier {
-	return graph.Identifier(ingress.GetUID())
+func newIngressProbe(client interface{}, g *graph.Graph) Subprobe {
+	return NewResourceCache(client.(*kubernetes.Clientset).ExtensionsV1beta1().RESTClient(), &v1beta1.Ingress{}, "ingresses", g, &ingressHandler{})
 }
 
-func (p *ingressProbe) OnAdd(obj interface{}) {
-	if ingress, ok := obj.(*v1beta1.Ingress); ok {
-		p.graph.Lock()
-		defer p.graph.Unlock()
-
-		newNode(p.graph, ingressUID(ingress), p.newMetadata(ingress))
-		logging.GetLogger().Debugf("Added %s", dumpIngress(ingress))
-	}
-}
-
-func (p *ingressProbe) OnUpdate(oldObj, newObj interface{}) {
-	if ingress, ok := newObj.(*v1beta1.Ingress); ok {
-		p.graph.Lock()
-		defer p.graph.Unlock()
-
-		if nsNode := p.graph.GetNode(ingressUID(ingress)); nsNode != nil {
-			addMetadata(p.graph, nsNode, ingress)
-			logging.GetLogger().Debugf("Updated %s", dumpIngress(ingress))
-		}
-	}
-}
-
-func (p *ingressProbe) OnDelete(obj interface{}) {
-	if ingress, ok := obj.(*v1beta1.Ingress); ok {
-		p.graph.Lock()
-		defer p.graph.Unlock()
-
-		if nsNode := p.graph.GetNode(ingressUID(ingress)); nsNode != nil {
-			p.graph.DelNode(nsNode)
-			logging.GetLogger().Debugf("Deleted %s", dumpIngress(ingress))
-		}
-	}
-}
-
-func (p *ingressProbe) Start() {
-	p.kubeCache.Start()
-}
-
-func (p *ingressProbe) Stop() {
-	p.kubeCache.Stop()
-}
-
-func newIngressKubeCache(handler cache.ResourceEventHandler) *kubeCache {
-	return newKubeCache(getClientset().ExtensionsV1beta1().RESTClient(), &v1beta1.Ingress{}, "ingresses", handler)
-}
-
-func newIngressProbe(g *graph.Graph) probe.Probe {
-	p := &ingressProbe{
-		graph: g,
-	}
-	p.kubeCache = newIngressKubeCache(p)
-	return p
+func newIngressServiceLinker(g *graph.Graph) probe.Probe {
+	return newResourceLinker(g, GetSubprobesMap(Manager), "ingress", MetadataFields("Namespace", "Backend.ServiceName"), "service", MetadataFields("Namespace", "Name"), graph.Metadata{"RelationType": "ingress"})
 }

@@ -3,6 +3,17 @@
 # host_id is used to reference the agent, by default set to hostname
 # host_id:
 
+tls:
+  # File path to X509 Certificate and Private Key to enable TLS communication
+  # Unique certificate per agent is recommended
+  # client_cert: /etc/ssl/certs/agent.domain.com.crt
+  # client_key:  /etc/ssl/certs/agent.domain.com.key
+
+  # server_cert: /etc/ssl/certs/analyzer.domain.com.crt
+  # server_key:  /etc/ssl/certs/analyzer.domain.com.key
+
+  # ca_cert: /etc/ssl/certs/ca.domain.com.crt
+
 http:
   # define the Cookie HTTP Request Header
   cookie:
@@ -37,10 +48,19 @@ analyzer:
   # Default addr is 127.0.0.1
   # listen: :8082
 
-  # File path to X509 Certificate and Private Key to enable TLS communication
-  # Must be different than the agent
-  # X509_cert: /etc/ssl/certs/analyzer.domain.com.crt
-  # X509_key:  /etc/ssl/certs/analyzer.domain.com.key
+  auth:
+    # auth section for API request
+    api:
+      # Specify the name of the auth backend definition, see auth section.
+      # backend: noauth
+
+    cluster:
+      # Specify the name of the auth backend definition, see auth section.
+      # backend: noauth
+
+      # Specify username, password for cluster authentication. Used for analyzer/analyzer communication.
+      # username: admin
+      # password: password
 
   # Section defining things to be invoked on startup
   startup:
@@ -89,6 +109,56 @@ analyzer:
     # list of probes used by the analyzers
     probes:
       # - k8s
+      # - istio
+
+    k8s:
+      # EXPERIMENTAL: k8s probe is still under development and should not be used
+      # on production systems
+
+      # kubeconfig resolution order:
+      # - if config_file param is defined then use it;
+      # - else if $KUBECONFIG environment is define then use it;
+      # - else if $HOME/.kube/config file exists then use it;
+      # - else use empty configuration (for accessing from within the k8s cluster).
+
+      # specify the path of k8s configuration YAML file.
+      # config_file: /etc/skydive/kubeconfig
+
+      # list of (sub) probes comprising k8s probe.
+      # if list is empty then will resolve to all existing (sub) probes.
+      probes:
+        - cluster
+        - container
+        - cronjob
+        - deployment
+        - endpoints
+        - ingress
+        - job
+        - namespace
+        - networkpolicy
+        - node
+        - persistentvolume
+        - persistentvolumeclaim
+        - pod
+        - replicaset
+        - replicationcontroller
+        - service
+        - statefulset
+        - storageclass
+
+    istio:
+      # specify the path of istio configuration YAML file.
+      # config_file: /etc/skydive/kubeconfig
+
+      # EXPERIMENTAL: istio probe is still under development and should not be used
+      # on production systems
+      probes:
+      - destinationrule
+      - gateway
+      - quotaspec
+      - quotaspecbinding
+      - serviceentry
+      - virtualservice
 
   replication:
     # debug: false
@@ -102,22 +172,22 @@ agent:
   # Default addr is 127.0.0.1
   # listen: :8081
 
-  # File path to X509 Certificate and Private Key to enable TLS communication
-  # Must be different than the analyzer and unique per agent (recommended)
-  # X509_cert: /etc/ssl/certs/agent.domain.com.crt
-  # X509_key:  /etc/ssl/certs/agent.domain.com.key
 
-  # Allow to use auto-signed Certificate
-  # X509_insecure: false
+  auth:
+    # auth section for API request
+    api:
+      # Specify the name of the auth backend definition, see auth section.
+      # backend: noauth
 
-  # Server name field specified in TLS communications.
-  # Not required, but can be used to allow virtual hosting
-  # X509_servername: domain.com
+    cluster:
+      # Specify username, password for cluster authentication. Used for agent/analyzer communication.
+      # username: admin
+      # password: password
 
   topology:
     # Probes used to capture topology information like interfaces,
     # bridges, namespaces, etc...
-    # Available: ovsdb, docker, neutron, opencontrail, socketinfo, lxd
+    # Available: ovsdb, docker, neutron, opencontrail, socketinfo, lxd, lldp
     probes:
       # - ovsdb
       # - docker
@@ -125,6 +195,8 @@ agent:
       # - opencontrail
       # - socketinfo
       # - lxd
+      # - lldp
+      # - runc
 
     netlink:
       # delay in seconds between two metric updates
@@ -143,6 +215,19 @@ agent:
 
       # The endpoint_type value must be 'public', 'internal' or 'admin'
       # endpoint_type: public
+
+    lldp:
+      # Interfaces to listen for LLDP frames. If no list is specified,
+      # use all interfaces
+      interfaces:
+        # - eth0
+
+    libvirt:
+      # url: qemu:///system
+
+    runc:
+      run_path:
+        # - /var/run/runc
 
   capture:
     # Period in second to get capture stats from the probe. Note this
@@ -277,23 +362,30 @@ logging:
   # color: false
 
 auth:
-  # specify the type of authentication mechanism: noauth, basic, keystone (default: noauth)
-  # type: basic
-  basic:
+  mybasic:
+    # Define a basic auth authentication backend
+    # type: basic
+
+    # Specify the htpassword file to be used
     # file: /etc/skydive/htpasswd
 
-  # Define Keystone authentication type parameters
-  keystone:
+    # Users can be declared in this section instead of using a file.
+    users:
+      # user1: secret1
+      # user2: secret2
+
+  mykeystone:
+    # Define a basic auth authentication backend
+    # type: keystone
     # auth_url: http://xxx.xxx.xxx.xxx:5000/v3
 
     # define the tenant and the domain that the users have to belong to
     # tenant_name: admin
     # domain_name: Default
 
-  # The 'analyzer_username' and 'analyzer_password' parameters are
-  # used by the agent to authenticate against the analyzer
-  # analyzer_username: admin
-  # analyzer_password: password
+    # define which role an authenticated user will have. Only used for API authentication.
+    # two roles are predefined, admin and guest.
+    # role: admin
 
 etcd:
   # server parameters
@@ -350,40 +442,6 @@ flow:
     udp:
       # 1194: OPENVPN
 
-k8s:
-  # EXPERIMENTAL: k8s probe is still under development and should not be used
-  # on production systems
-
-  # kubeconfig resolution order:
-  # - if config_file param is defined then use it;
-  # - else if $KUBECONFIG environment is define then use it;
-  # - else if $HOME/.kube/config file exists then use it;
-  # - else use empty configuration (for accessing from within the k8s cluster).
-
-  # specify the path of k8s configuration YAML file.
-  # config_file: /etc/skydive/kubeconfig
-
-  # list of (sub) probes comprising k8s probe.
-  # if list is empty then will resolve to all existing (sub) probes.
-  probes:
-  - cluster
-  - container
-  - cronjob
-  - deployment
-  - ingress
-  - job
-  - namespace
-  - networkpolicy
-  - node
-  - persistentvolume
-  - persistentvolumeclaim
-  - pod
-  - replicaset
-  - replicationcontroller
-  - service
-  - statefulset
-  - storageclass
-
 ui:
   # Specify the extra assets folder. Javascript and CSS files present in this
   # folder will be added to the WebUI.
@@ -421,6 +479,9 @@ ui:
   # Enable/disable ssh to hosts
   # ssh_enabled: false
 
+  # Enable/disable k8s related elements
+  # k8s_enabled: false
+
   bpf:
     # Pre-defined BPF filters
     favorites:
@@ -443,3 +504,4 @@ rbac:
   policy:
     # additional RBAC policy:
     # - p, myuser, capture, write, deny
+    # - g, myuser, myrole

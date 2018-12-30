@@ -268,6 +268,51 @@ var TopologyGraphLayout = function(vm, selector) {
     .call(this.zoom)
     .on("dblclick.zoom", null);
 
+  var defsMarker = function(type, target, point) {
+    let id = "arrowhead-"+type+"-"+target+"-"+point;
+
+    let refX = 1.65
+    let refY = 0.15
+    let pathD = "M0,0 L0,0.3 L0.5,0.15 Z"
+    if (type === "egress" || point === "end") {
+      pathD = "M0.5,0 L0.5,0.3 L0,0.15 Z"
+    }
+
+    if (target === "deny") {
+      refX = 1.85
+      refY = 0.3
+      a = "M0.1,0 L0.6,0.5 L0.5,0.6 L0,0.1 Z"
+      b = "M0,0.5 L0.1,0.6 L0.6,0.1 L0.5,0 Z"
+      pathD = a + " " + b
+    }
+
+    let color = "rgb(0, 128, 0, 0.8)"
+    if (target === "deny") {
+      color = "rgba(255, 0, 0, 0.8)"
+    }
+
+    self.svg.append("defs").append("marker")
+      .attr("id", id)
+      .attr("refX", refX)
+      .attr("refY", refY)
+      .attr("markerWidth", 1)
+      .attr("markerHeight", 1)
+      .attr("orient", "auto")
+      .attr("markerUnits", "strokeWidth")
+      .append("path")
+        .attr("fill", color)
+        .attr("d", pathD);
+  }
+
+  defsMarker("ingress", "deny", "begin");
+  defsMarker("ingress", "deny", "end");
+  defsMarker("ingress", "allow", "begin");
+  defsMarker("ingress", "allow", "end");
+  defsMarker("egress", "deny", "begin");
+  defsMarker("egress", "deny", "end");
+  defsMarker("egress", "allow", "begin");
+  defsMarker("egress", "allow", "end");
+
   this.g = this.svg.append("g");
 
   this.group = this.g.append("g").attr('class', 'groups').selectAll(".group");
@@ -289,7 +334,7 @@ var TopologyGraphLayout = function(vm, selector) {
   };
 
   this.loadBandwidthConfig()
-  self.bandwidth.intervalID = setInterval(self.updatelinkLatency.bind(self), self.bandwidth.updatePeriod);
+  self.bandwidth.intervalID = setInterval(self.updateLinkLabelHandler.bind(self), self.bandwidth.updatePeriod);
 };
 
 TopologyGraphLayout.prototype = {
@@ -557,7 +602,7 @@ TopologyGraphLayout.prototype = {
   },
 
   setGroupLevel: function(group) {
-    var level = 1, g = group;
+    var level = 0, g = group;
     while (g) {
       if (level > g.depth) g.depth = level;
       level++;
@@ -758,7 +803,9 @@ TopologyGraphLayout.prototype = {
         }
       }
     }
-    if (node.metadata.Capture && !node._metadata.Capture) {
+
+    if (node.metadata.Capture && node.metadata.Capture.State === "active" && 
+        (!node._metadata.Capture || node._metadata.Capture.State !== "active")) {
       this.captureStarted(node);
     } else if (!node.metadata.Capture && node._metadata.Capture) {
       this.captureStopped(node);
@@ -1302,7 +1349,7 @@ TopologyGraphLayout.prototype = {
       if (maxLevel === 0) {
         return false;
       }
-      if ((this.collapseLevel + 1) >= maxLevel) {
+      if ((this.collapseLevel) >= maxLevel) {
         return false;
       }
 
@@ -1394,7 +1441,7 @@ TopologyGraphLayout.prototype = {
     return this.styleReturn(d, ["YellowGreen", "Yellow", "Tomato", ""]);
   },
 
-  updateLinkLabel: function() {
+  bindLinkLabelData: function() {
     this.linkLabel = this.linkLabel.data(Object.values(this.linkLabelData), function(d) { return d.id; });
   },
 
@@ -1428,48 +1475,46 @@ TopologyGraphLayout.prototype = {
     }
   },
 
-  updatelinkLatency: function() {
+  updateLinkLabelHandler: function() {
     var self = this;
 
     this.updateLinkLabelData();
-    this.updateLinkLabel();
-    var exit = this.linkLabel.exit();
+    this.bindLinkLabelData();
 
     // update links which don't have traffic
+    var exit = this.linkLabel.exit();
     exit.each(function(d) {
       self.g.select("#link-" + d.link.id)
-      .classed ("link-label-active", false)
-      .classed ("link-label-warning", false)
-      .classed ("link-label-alert", false)
+      .classed("link-label-active", false)
+      .classed("link-label-warning", false)
+      .classed("link-label-alert", false)
       .style("stroke-dasharray", "")
       .style("stroke-dashoffset", "")
       .style("animation", "")
       .style("stroke", "");
     });
-
     exit.remove();
 
-    var linkLabelEnter = this.linkLabel.enter()
+    var enter = this.linkLabel.enter()
       .append('text')
       .attr("id", function(d) { return "link-label-" + d.id; })
       .attr("class", "link-label");
-    linkLabelEnter.append('textPath')
+    enter.append('textPath')
       .attr("startOffset", "50%")
       .attr("xlink:href", function(d) { return "#link-" + d.link.id; } );
-
-    this.linkLabel = linkLabelEnter.merge(this.linkLabel);
+    this.linkLabel = enter.merge(this.linkLabel);
 
     this.linkLabel.select('textPath')
-      .classed ("link-label-active", function(d) { return d.active; })
-      .classed ("link-label-warning", function(d) { return d.warning; })
-      .classed ("link-label-alert",  function(d) { return d.alert; })
+      .classed("link-label-active", function(d) { return d.active; })
+      .classed("link-label-warning", function(d) { return d.warning; })
+      .classed("link-label-alert",  function(d) { return d.alert; })
       .text(function(d) { return d.text; });
 
     this.linkLabel.each(function(d) {
       self.g.select("#link-" + d.link.id)
-        .classed ("link-label-active", d.active)
-        .classed ("link-label-warning", d.warning)
-        .classed ("link-label-alert", d.alert)
+        .classed("link-label-active", d.active)
+        .classed("link-label-warning", d.warning)
+        .classed("link-label-alert", d.alert)
         .style("stroke-dasharray", self.styleStrokeDasharray(d))
         .style("stroke-dashoffset", self.styleStrokeDashoffset(d))
         .style("animation", self.styleAnimation(d))
@@ -1485,11 +1530,29 @@ TopologyGraphLayout.prototype = {
       return;
     delete this.linkLabelData[link.id];
 
-    this.updateLinkLabel();
+    this.bindLinkLabelData();
     this.linkLabel.exit().remove();
 
     // force a tick
     this.tick();
+  },
+
+  arrowhead: function(link) {
+    let none = "url(#arrowhead-none)";
+
+    if (link.source.metadata.Type !== "networkpolicy") {
+      return none
+    }
+
+    if (link.target.metadata.Type !== "pod") {
+      return none
+    }
+
+    if (link.metadata.RelationType !== "networkpolicy") {
+      return none
+    }
+
+    return "url(#arrowhead-"+link.metadata.PolicyType+"-"+link.metadata.PolicyTarget+"-"+link.metadata.PolicyPoint+")";
   },
 
   update: function() {
@@ -1529,10 +1592,22 @@ TopologyGraphLayout.prototype = {
       .attr("height", "24")
       .attr("xlink:href", this.nodeImg);
 
+    // node rectangle
+    nodeEnter.append("rect")
+      .attr("class", "node-text-rect")
+      .attr("width", function(d) { return self.nodeTitle(d).length * 10 + 10; })
+      .attr("height", 25)
+      .attr("x", function(d) {
+        return self.nodeSize(d) * 1.6 - 5;
+      })
+      .attr("y", -8)
+      .attr("rx", 4)
+      .attr("ry", 4);
+
     // node title
     nodeEnter.append("text")
       .attr("dx", function(d) {
-        return self.nodeSize(d) + 5;
+        return self.nodeSize(d) * 1.6;
       })
       .attr("dy", 10)
       .text(this.nodeTitle);
@@ -1573,7 +1648,8 @@ TopologyGraphLayout.prototype = {
       .on("click", function(d) {self.onEdgeClick(d.link); })
       .on("mouseover", function(d) { self.highlightLink(d.link); })
       .on("mouseout", function(d) { self.unhighlightLink(d.link); })
-      .attr("class", this.linkWrapClass);
+      .attr("class", this.linkWrapClass)
+      .attr("marker-end", function(d) { return self.arrowhead(d.link); });
 
     this.linkWrap = linkWrapEnter.merge(this.linkWrap);
 

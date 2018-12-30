@@ -23,124 +23,65 @@
 package k8s
 
 import (
-	"github.com/skydive-project/skydive/probe"
-	"github.com/skydive-project/skydive/topology/graph"
+	"fmt"
 
-	"k8s.io/api/core/v1"
-	"k8s.io/client-go/tools/cache"
+	"github.com/skydive-project/skydive/graffiti/graph"
+	"github.com/skydive-project/skydive/probe"
+
+	v1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/kubernetes"
 )
 
-type nodeProbe struct {
-	defaultKubeCacheEventHandler
-	graph.DefaultGraphListener
-	*kubeCache
-	graph       *graph.Graph
-	nodeIndexer *graph.MetadataIndexer
-	hostIndexer *graph.MetadataIndexer
-	podIndexer  *graph.MetadataIndexer
+type nodeHandler struct {
 }
 
-func newNodeIndexer(g *graph.Graph) *graph.MetadataIndexer {
-	return graph.NewMetadataIndexer(g, graph.Metadata{"Type": "node"}, "Name")
+func (h *nodeHandler) Dump(obj interface{}) string {
+	node := obj.(*v1.Node)
+	return fmt.Sprintf("node{Name: %s}", node.Name)
 }
 
-func newHostIndexer(g *graph.Graph) *graph.MetadataIndexer {
-	return graph.NewMetadataIndexer(g, graph.Metadata{"Type": "host"}, "Name")
-}
+func (h *nodeHandler) Map(obj interface{}) (graph.Identifier, graph.Metadata) {
+	node := obj.(*v1.Node)
 
-func (c *nodeProbe) newMetadata(node *v1.Node) graph.Metadata {
-	m := newMetadata("node", node.Namespace, node.Name, node)
-	m.SetFieldAndNormalize("Labels", node.Labels)
-	m.SetField("Cluster", node.ClusterName)
+	m := NewMetadataFields(&node.ObjectMeta)
 	for _, a := range node.Status.Addresses {
-		switch a.Type {
-		case "Hostname", "InternalIP", "ExternalIP":
+		if a.Type == "Hostname" || a.Type == "InternalIP" || a.Type == "ExternalIP" {
 			m.SetField(string(a.Type), a.Address)
 		}
 	}
-	info := node.Status.NodeInfo
-	m.SetField("Arch", info.Architecture)
-	m.SetField("Kernel", info.KernelVersion)
-	m.SetField("OS", info.OperatingSystem)
-	return m
+	m.SetField("Arch", node.Status.NodeInfo.Architecture)
+	m.SetField("Kernel", node.Status.NodeInfo.KernelVersion)
+	m.SetField("OS", node.Status.NodeInfo.OperatingSystem)
+
+	return graph.Identifier(node.GetUID()), NewMetadata(Manager, "node", m, node, node.Name)
 }
 
-func linkNodeToHost(g *graph.Graph, host, node *graph.Node) {
-	addLink(g, host, node)
+func newNodeProbe(client interface{}, g *graph.Graph) Subprobe {
+	return NewResourceCache(client.(*kubernetes.Clientset).Core().RESTClient(), &v1.Node{}, "nodes", g, &nodeHandler{})
 }
 
-func nodeUID(node *v1.Node) graph.Identifier {
-	return graph.Identifier(node.GetUID())
-}
-
-func (c *nodeProbe) onAdd(obj interface{}) {
-	node := obj.(*v1.Node)
-
-	c.graph.Lock()
-	defer c.graph.Unlock()
-
-	hostName := node.GetName()
-	nodeNodes, _ := c.nodeIndexer.Get(hostName)
-	var nodeNode *graph.Node
-	if len(nodeNodes) == 0 {
-		nodeNode = newNode(c.graph, nodeUID(node), c.newMetadata(node))
-	} else {
-		nodeNode = nodeNodes[0]
-		addMetadata(c.graph, nodeNode, node)
+func newHostNodeLinker(g *graph.Graph) probe.Probe {
+	nodeProbe := GetSubprobe(Manager, "node")
+	if nodeProbe == nil {
+		return nil
 	}
 
-	podNodes, _ := c.podIndexer.Get(hostName)
-	linkPodsToNode(c.graph, nodeNode, podNodes)
+	hostIndexer := graph.NewMetadataIndexer(g, g, graph.Metadata{"Type": "host"}, "Hostname")
+	hostIndexer.Start()
 
-	hostNodes, _ := c.hostIndexer.Get(hostName)
-	if len(hostNodes) != 0 {
-		linkNodeToHost(c.graph, hostNodes[0], nodeNode)
+	nodeIndexer := graph.NewMetadataIndexer(g, nodeProbe, graph.Metadata{"Type": "node"}, MetadataField("Name"))
+	nodeIndexer.Start()
+
+	ml := graph.NewMetadataIndexerLinker(g, hostIndexer, nodeIndexer, NewEdgeMetadata(Manager, "association"))
+
+	linker := &Linker{
+		ResourceLinker: ml.ResourceLinker,
 	}
+	ml.AddEventListener(linker)
+
+	return linker
 }
 
-func (c *nodeProbe) OnAdd(obj interface{}) {
-	c.onAdd(obj)
-}
-
-func (c *nodeProbe) OnUpdate(oldObj, newObj interface{}) {
-	c.onAdd(newObj)
-}
-
-func (c *nodeProbe) OnDelete(obj interface{}) {
-	if node, ok := obj.(*v1.Node); ok {
-		c.graph.Lock()
-		if nodeNode := c.graph.GetNode(nodeUID(node)); nodeNode != nil {
-			c.graph.DelNode(nodeNode)
-		}
-		c.graph.Unlock()
-	}
-}
-
-func (c *nodeProbe) Start() {
-	c.kubeCache.Start()
-	c.nodeIndexer.Start()
-	c.hostIndexer.Start()
-	c.podIndexer.Start()
-}
-
-func (c *nodeProbe) Stop() {
-	c.kubeCache.Stop()
-	c.nodeIndexer.Stop()
-	c.hostIndexer.Stop()
-	c.podIndexer.Stop()
-}
-
-func newNodeKubeCache(handler cache.ResourceEventHandler) *kubeCache {
-	return newKubeCache(getClientset().Core().RESTClient(), &v1.Node{}, "nodes", handler)
-}
-
-func newNodeProbe(g *graph.Graph) probe.Probe {
-	c := &nodeProbe{
-		graph:       g,
-		hostIndexer: newHostIndexer(g),
-		nodeIndexer: newNodeIndexer(g),
-		podIndexer:  newPodIndexerByHost(g),
-	}
-	c.kubeCache = newNodeKubeCache(c)
-	return c
+func newNodePodLinker(g *graph.Graph) probe.Probe {
+	return newResourceLinker(g, GetSubprobesMap(Manager), "node", MetadataFields("Name"), "pod", MetadataFields("Node"), NewEdgeMetadata(Manager, "association"))
 }

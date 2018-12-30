@@ -29,8 +29,8 @@ import (
 
 	"github.com/skydive-project/skydive/common"
 	"github.com/skydive-project/skydive/flow"
-	"github.com/skydive-project/skydive/topology/graph"
-	"github.com/skydive-project/skydive/topology/graph/traversal"
+	"github.com/skydive-project/skydive/graffiti/graph"
+	"github.com/skydive-project/skydive/graffiti/graph/traversal"
 )
 
 type FakeGraphBackend struct {
@@ -42,14 +42,14 @@ func (b *FakeGraphBackend) IsHistorySupported() bool {
 }
 
 func testMetric(t *testing.T, metrics, expected map[string][]common.Metric, tm time.Time, dr time.Duration) {
-	g := graph.NewGraph("test", &FakeGraphBackend{}, common.ExternalService)
+	g := graph.NewGraph("test", &FakeGraphBackend{}, common.UnknownService)
 
 	gt := traversal.NewGraphTraversal(g, false)
 	gt = gt.Context(tm, dr)
 
 	step := NewMetricsTraversalStep(gt, metrics)
 
-	got := step.Aggregates(int64(10))
+	got := step.Aggregates(traversal.StepContext{}, int64(10))
 
 	exp := NewMetricsTraversalStep(gt, expected)
 	if !reflect.DeepEqual(exp.Values(), got.Values()) {
@@ -610,16 +610,15 @@ func TestFlowMetricsAggregates13(t *testing.T) {
 }
 
 func testMetricSum(t *testing.T, metrics map[string][]common.Metric, expected common.Metric, tm time.Time, dr time.Duration) {
-	g := graph.NewGraph("test", &FakeGraphBackend{}, common.ExternalService)
+	g := graph.NewGraph("test", &FakeGraphBackend{}, common.UnknownService)
 
 	gt := traversal.NewGraphTraversal(g, false)
 	gt = gt.Context(tm, dr)
+	ctx := traversal.StepContext{}
 
 	step := NewMetricsTraversalStep(gt, metrics)
 
-	//	fmt.Printf("############# %+v\n", step.Aggregates(int64(10)).metrics)
-
-	got := step.Aggregates(int64(10)).Sum().Values()[0]
+	got := step.Aggregates(ctx, int64(10)).Sum(ctx).Values()[0]
 
 	if !reflect.DeepEqual(expected, got) {
 		t.Errorf("Metrics mismatch, expected: \n\n%s\n\ngot: \n\n%s", expected, got)

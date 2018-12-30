@@ -32,22 +32,23 @@ import (
 	"github.com/skydive-project/skydive/api/types"
 	"github.com/skydive-project/skydive/common"
 	"github.com/skydive-project/skydive/etcd"
+	"github.com/skydive-project/skydive/filters"
 	"github.com/skydive-project/skydive/flow/ondemand"
+	"github.com/skydive-project/skydive/graffiti/graph"
 	ge "github.com/skydive-project/skydive/gremlin/traversal"
-	shttp "github.com/skydive-project/skydive/http"
 	"github.com/skydive-project/skydive/logging"
-	"github.com/skydive-project/skydive/topology/graph"
+	ws "github.com/skydive-project/skydive/websocket"
 )
 
 // OnDemandProbeClient describes an ondemand probe client based on a websocket
 type OnDemandProbeClient struct {
 	common.RWMutex
-	*etcd.MasterElector
+	common.MasterElection
 	graph.DefaultGraphListener
 	graph                *graph.Graph
 	captureHandler       *api.CaptureAPIHandler
-	agentPool            shttp.WSStructSpeakerPool
-	subscriberPool       shttp.WSStructSpeakerPool
+	agentPool            ws.StructSpeakerPool
+	subscriberPool       ws.StructSpeakerPool
 	captures             map[string]*types.Capture
 	watcher              api.StoppableWatcher
 	registeredNodes      map[string]string
@@ -61,8 +62,8 @@ type nodeProbe struct {
 	capture *types.Capture
 }
 
-// OnWSStructMessage event, valid message type : CaptureStartReply or CaptureStopReply message
-func (o *OnDemandProbeClient) OnWSStructMessage(c shttp.WSSpeaker, m *shttp.WSStructMessage) {
+// OnStructMessage event, valid message type : CaptureStartReply or CaptureStopReply message
+func (o *OnDemandProbeClient) OnStructMessage(c ws.Speaker, m *ws.StructMessage) {
 	var query ondemand.CaptureQuery
 	if err := m.UnmarshalObj(&query); err != nil {
 		logging.GetLogger().Errorf("Unable to decode capture %v", m)
@@ -80,7 +81,7 @@ func (o *OnDemandProbeClient) OnWSStructMessage(c shttp.WSSpeaker, m *shttp.WSSt
 		} else {
 			logging.GetLogger().Debugf("Capture start request succeeded %v", m.Debug())
 		}
-		o.subscriberPool.BroadcastMessage(shttp.NewWSStructMessage(ondemand.NotificationNamespace, "CaptureNodeUpdated", query.Capture.UUID))
+		o.subscriberPool.BroadcastMessage(ws.NewStructMessage(ondemand.NotificationNamespace, "CaptureNodeUpdated", query.Capture.UUID))
 	case "CaptureStopReply":
 		if m.Status == http.StatusOK {
 			logging.GetLogger().Debugf("Capture stop request succeeded %v", m.Debug())
@@ -116,11 +117,11 @@ func (o *OnDemandProbeClient) registerProbes(nodes []interface{}, capture *types
 			return
 		}
 
-		if node.Host() == "" {
+		if node.Host == "" {
 			return
 		}
 
-		return node.ID, node.Host(), true
+		return node.ID, node.Host, true
 	}
 
 	nps := map[graph.Identifier]nodeProbe{}
@@ -156,10 +157,10 @@ func (o *OnDemandProbeClient) registerProbe(np nodeProbe) bool {
 		Capture: *np.capture,
 	}
 
-	msg := shttp.NewWSStructMessage(ondemand.Namespace, "CaptureStart", cq)
+	msg := ws.NewStructMessage(ondemand.Namespace, "CaptureStart", cq)
 
 	if err := o.agentPool.SendMessageTo(msg, np.host); err != nil {
-		logging.GetLogger().Errorf("Unable to send message to agent %s: %s", np.host, err.Error())
+		logging.GetLogger().Errorf("Unable to send message to agent %s: %s", np.host, err)
 		return false
 	}
 	o.Lock()
@@ -175,14 +176,14 @@ func (o *OnDemandProbeClient) unregisterProbe(node *graph.Node, capture *types.C
 		Capture: *capture,
 	}
 
-	msg := shttp.NewWSStructMessage(ondemand.Namespace, "CaptureStop", cq)
+	msg := ws.NewStructMessage(ondemand.Namespace, "CaptureStop", cq)
 
 	if _, err := node.GetFieldString("Capture.ID"); err != nil {
 		return false
 	}
 
-	if err := o.agentPool.SendMessageTo(msg, node.Host()); err != nil {
-		logging.GetLogger().Errorf("Unable to send message to agent %s: %s", node.Host(), err.Error())
+	if err := o.agentPool.SendMessageTo(msg, node.Host); err != nil {
+		logging.GetLogger().Errorf("Unable to send message to agent %s: %s", node.Host, err)
 		return false
 	}
 
@@ -192,7 +193,7 @@ func (o *OnDemandProbeClient) unregisterProbe(node *graph.Node, capture *types.C
 func (o *OnDemandProbeClient) applyGremlinExpr(query string) []interface{} {
 	res, err := ge.TopologyGremlinQuery(o.graph, query)
 	if err != nil {
-		logging.GetLogger().Errorf("Gremlin %s error: %s", query, err.Error())
+		logging.GetLogger().Errorf("Gremlin %s error: %s", query, err)
 		return nil
 	}
 	return res.Values()
@@ -253,7 +254,7 @@ func (o *OnDemandProbeClient) OnNodeUpdated(n *graph.Node) {
 func (o *OnDemandProbeClient) OnNodeDeleted(n *graph.Node) {
 	o.RLock()
 	if uuid, ok := o.registeredNodes[string(n.ID)]; ok {
-		o.subscriberPool.BroadcastMessage(shttp.NewWSStructMessage(ondemand.NotificationNamespace, "CaptureNodeUpdated", uuid))
+		o.subscriberPool.BroadcastMessage(ws.NewStructMessage(ondemand.NotificationNamespace, "CaptureNodeUpdated", uuid))
 	}
 	o.RUnlock()
 }
@@ -286,8 +287,8 @@ func (o *OnDemandProbeClient) onCaptureAdded(capture *types.Capture) {
 }
 
 func (o *OnDemandProbeClient) unregisterCapture(capture *types.Capture) {
-	o.graph.Lock()
-	defer o.graph.Unlock()
+	o.graph.RLock()
+	defer o.graph.RUnlock()
 
 	o.deletedNodeCache.Delete(capture.UUID)
 
@@ -295,21 +296,10 @@ func (o *OnDemandProbeClient) unregisterCapture(capture *types.Capture) {
 	delete(o.captures, capture.UUID)
 	o.Unlock()
 
-	res, err := ge.TopologyGremlinQuery(o.graph, capture.GremlinQuery)
-	if err != nil {
-		logging.GetLogger().Errorf("Gremlin error: %s", err.Error())
-		return
-	}
-
-	for _, value := range res.Values() {
-		switch e := value.(type) {
-		case *graph.Node:
-			o.unregisterProbe(e, capture)
-		case []*graph.Node:
-			for _, node := range e {
-				o.unregisterProbe(node, capture)
-			}
-		}
+	filter := filters.NewTermStringFilter("Capture.ID", capture.UUID)
+	nodes := o.graph.GetNodes(graph.NewElementFilter(filter))
+	for _, node := range nodes {
+		o.unregisterProbe(node, capture)
 	}
 }
 
@@ -356,17 +346,17 @@ func (o *OnDemandProbeClient) onAPIWatcherEvent(action string, id string, resour
 	capture := resource.(*types.Capture)
 	switch action {
 	case "init", "create", "set", "update":
-		o.subscriberPool.BroadcastMessage(shttp.NewWSStructMessage(ondemand.NotificationNamespace, "CaptureAdded", capture))
+		o.subscriberPool.BroadcastMessage(ws.NewStructMessage(ondemand.NotificationNamespace, "CaptureAdded", capture))
 		o.onCaptureAdded(capture)
 	case "expire", "delete":
-		o.subscriberPool.BroadcastMessage(shttp.NewWSStructMessage(ondemand.NotificationNamespace, "CaptureDeleted", capture))
+		o.subscriberPool.BroadcastMessage(ws.NewStructMessage(ondemand.NotificationNamespace, "CaptureDeleted", capture))
 		o.onCaptureDeleted(capture)
 	}
 }
 
 // Start the probe
 func (o *OnDemandProbeClient) Start() {
-	o.MasterElector.StartAndWait()
+	o.MasterElection.StartAndWait()
 
 	o.checkForRegistration.Start()
 
@@ -377,33 +367,32 @@ func (o *OnDemandProbeClient) Start() {
 // Stop the probe
 func (o *OnDemandProbeClient) Stop() {
 	o.watcher.Stop()
-	o.MasterElector.Stop()
+	o.MasterElection.Stop()
 	o.checkForRegistration.Stop()
 }
 
 // NewOnDemandProbeClient creates a new ondemand probe client based on Capture API, graph and websocket
-func NewOnDemandProbeClient(g *graph.Graph, ch *api.CaptureAPIHandler, agentPool shttp.WSStructSpeakerPool, subscriberPool shttp.WSStructSpeakerPool, etcdClient *etcd.Client) *OnDemandProbeClient {
+func NewOnDemandProbeClient(g *graph.Graph, ch *api.CaptureAPIHandler, agentPool ws.StructSpeakerPool, subscriberPool ws.StructSpeakerPool, etcdClient *etcd.Client) *OnDemandProbeClient {
 	resources := ch.Index()
 	captures := make(map[string]*types.Capture)
 	for _, resource := range resources {
 		captures[resource.ID()] = resource.(*types.Capture)
 	}
 
-	elector := etcd.NewMasterElectorFromConfig(common.AnalyzerService, "ondemand-client", etcdClient)
-
+	election := etcdClient.NewElection("ondemand-client")
 	o := &OnDemandProbeClient{
-		MasterElector:    elector,
+		MasterElection:   election,
 		graph:            g,
 		captureHandler:   ch,
 		agentPool:        agentPool,
 		subscriberPool:   subscriberPool,
 		captures:         captures,
 		registeredNodes:  make(map[string]string),
-		deletedNodeCache: cache.New(elector.TTL()*2, elector.TTL()*2),
+		deletedNodeCache: cache.New(election.TTL()*2, election.TTL()*2),
 	}
 	o.checkForRegistration = common.NewDebouncer(time.Second, o.checkForRegistrationCallback)
 
-	elector.AddEventListener(o)
+	election.AddEventListener(o)
 	agentPool.AddStructMessageHandler(o, []string{ondemand.Namespace})
 
 	return o

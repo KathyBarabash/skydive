@@ -44,7 +44,7 @@ if DEVMODE then
   # default config from tests/tests.go:testConfig
   $skydive_extra_config["flow.expire"] = "600"
   $skydive_extra_config["flow.update"] = "10"
-  $skydive_extra_config["agent.topology.probes"] = "netlink netns ovsdb docker"
+  $skydive_extra_config["agent.topology.probes"] = "netlink netns ovsdb docker lldp"
   $skydive_extra_config["agent.topology.metrics_update"] = "5"
   $skydive_extra_config["agent.metadata.mydict.value"] = "123"
   $skydive_extra_config["analyzer.startup.capture_gremlin"] = "g.V().Has('Name','startup-vm2')"
@@ -183,9 +183,9 @@ Vagrant.configure(2) do |config|
             if DEPLOYMENT_MODE == "binary" then
               ansible_extra_vars["skydive_binary_remote_location"] = "file://" + ENV.fetch("GOPATH") + "/bin/skydive"
             elsif DEPLOYMENT_MODE == "package" then
-              ansible_extra_vars["skydive_binary_remote_location"] = "file://" + ENV.fetch("GOPATH") + "/src/github.com/skydive-project/skydive/rpmbuild/RPMS/"
+              ansible_extra_vars["skydive_package_location"] = "file://" + ENV.fetch("GOPATH") + "/src/github.com/skydive-project/skydive/rpmbuild/RPMS/"
             elsif DEPLOYMENT_MODE == "container" then
-              ansible_extra_vars["skydive_binary_remote_location"] = "file://" + ENV.fetch("GOPATH") + "/src/github.com/skydive-project/skydive/skydive-docker-devel.tar"
+              ansible_extra_vars["skydive_load_docker_image"] = "file://" + ENV.fetch("GOPATH") + "/src/github.com/skydive-project/skydive/skydive-docker-devel.tar"
             end
           end
 

@@ -38,6 +38,8 @@ import (
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 
+	"github.com/skydive-project/skydive/analyzer"
+	"github.com/skydive-project/skydive/common"
 	"github.com/skydive-project/skydive/config"
 	"github.com/skydive-project/skydive/flow"
 	"github.com/skydive-project/skydive/logging"
@@ -68,9 +70,9 @@ var snortIndex = es.Index{
 
 const (
 	timestamp = iota
-	snortRAW
-	decodeHEX
-	END
+	stepSnortRAW
+	stepDecodeHEX
+	stepEnd
 )
 
 const sepHEX = "- -   - - - - - - - - - - - -  - - - - - - - - - - - -  - - - - - - - - -\n"
@@ -97,13 +99,20 @@ type snortMessage struct {
 	Data           []byte
 }
 
+type fakeMasterElection struct {
+}
+
+func (f *fakeMasterElection) NewElection(name string) common.MasterElection {
+	return nil
+}
+
 func flowFromSnortMessage(msg *snortMessage) *flow.Flow {
-	uuids := flow.FlowUUIDs{}
+	uuids := flow.UUIDs{}
 	nodeTID := ""
 	gpkt := gopacket.NewPacket(msg.Data, layers.LayerTypeEthernet, gopacket.NoCopy)
 	gpkt.Metadata().CaptureInfo.Timestamp = msg.Timestamp
 
-	return flow.NewFlowFromGoPacket(gpkt, nodeTID, uuids, flow.FlowOpts{})
+	return flow.NewFlowFromGoPacket(gpkt, nodeTID, uuids, flow.Opts{})
 }
 
 func parseSnortTimestamp(timestamp string) time.Time {
@@ -117,7 +126,7 @@ func parseSnortTimestamp(timestamp string) time.Time {
 
 func (sfe *SnortFlowEnhancer) insertElasticSearch(msg *snortMessage, f *flow.Flow) error {
 	if !sfe.client.Started() {
-		return fmt.Errorf("ElasticSearchStorage is not yet started")
+		return fmt.Errorf("Storage is not yet started")
 	}
 
 	snortMessage := map[string]interface{}{
@@ -161,21 +170,21 @@ func (sfe *SnortFlowEnhancer) parseSnortCMGX(reader *bufio.Reader) error {
 			msg.Timestamp = parseSnortTimestamp(regexTimestamp.ReplaceAllString(str, "${timestamp}"))
 			msg.Message = regexTimestamp.ReplaceAllString(str, "${message}")
 			msg.Classification = regexTimestamp.ReplaceAllString(str, "${classification}")
-			step = snortRAW
+			step = stepSnortRAW
 			continue
 		}
-		if step == snortRAW && regexSnortRAW.MatchString(str) {
+		if step == stepSnortRAW && regexSnortRAW.MatchString(str) {
 			packetBytes, err = strconv.Atoi(regexSnortRAW.ReplaceAllString(str, "${bytes}"))
 			if err != nil {
 				return err
 			}
-			step = decodeHEX
+			step = stepDecodeHEX
 			continue
 		}
-		if step == decodeHEX {
+		if step == stepDecodeHEX {
 			if str == sepHEX {
 				if len(msg.Data) > 0 {
-					step = END
+					step = stepEnd
 				}
 				continue
 			}
@@ -189,7 +198,7 @@ func (sfe *SnortFlowEnhancer) parseSnortCMGX(reader *bufio.Reader) error {
 				}
 			}
 		}
-		if step == END {
+		if step == stepEnd {
 			if packetBytes != len(msg.Data) {
 				return fmt.Errorf("msg.packetBytes(%d) != len(msg.Data)(%d)", packetBytes, len(msg.Data))
 			}
@@ -200,7 +209,7 @@ func (sfe *SnortFlowEnhancer) parseSnortCMGX(reader *bufio.Reader) error {
 	return nil
 }
 
-func (sfe *SnortFlowEnhancer) Start() {
+func (sfe *SnortFlowEnhancer) start() {
 	go sfe.client.Start()
 	go sfe.run()
 }
@@ -215,7 +224,7 @@ func (sfe *SnortFlowEnhancer) run() {
 	sfe.quit <- true
 }
 
-func (sfe *SnortFlowEnhancer) Stop() {
+func (sfe *SnortFlowEnhancer) stop() {
 	sfe.running.Store(false)
 	os.Stdin.Close()
 	sfe.client.Stop()
@@ -229,8 +238,8 @@ func newSnortFlowEnhancer() *SnortFlowEnhancer {
 
 	indices := []es.Index{snortIndex}
 
-	cfg := es.NewConfig()
-	client, err := es.NewClient(indices, cfg, nil)
+	cfg := analyzer.NewESConfig()
+	client, err := es.NewClient(indices, cfg, &fakeMasterElection{})
 	if err != nil {
 		if err != io.EOF {
 			logging.GetLogger().Errorf("elasticsearch client error : %v", err)
@@ -248,13 +257,13 @@ func main() {
 	if sfe == nil {
 		return
 	}
-	sfe.Start()
+	sfe.start()
 	logging.GetLogger().Info("Snort to Skydive started")
 
 	ch := make(chan os.Signal)
 	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
 	<-ch
 
-	sfe.Stop()
+	sfe.stop()
 	logging.GetLogger().Info("Snort to Skydive stopped")
 }

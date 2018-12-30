@@ -33,12 +33,12 @@ import (
 	"github.com/abbot/go-http-auth"
 	"github.com/skydive-project/skydive/api/types"
 	"github.com/skydive-project/skydive/flow"
+	"github.com/skydive-project/skydive/graffiti/graph"
+	"github.com/skydive-project/skydive/graffiti/graph/traversal"
 	ge "github.com/skydive-project/skydive/gremlin/traversal"
 	shttp "github.com/skydive-project/skydive/http"
 	"github.com/skydive-project/skydive/logging"
 	"github.com/skydive-project/skydive/rbac"
-	"github.com/skydive-project/skydive/topology/graph"
-	"github.com/skydive-project/skydive/topology/graph/traversal"
 	"github.com/skydive-project/skydive/validator"
 )
 
@@ -67,9 +67,9 @@ func (t *TopologyAPI) graphToDot(w http.ResponseWriter, g *graph.Graph) {
 		name, _ := n.GetFieldString("Name")
 		title := fmt.Sprintf("%s-%s", name, shortID(n.ID))
 		label := title
-		for k, v := range n.Metadata() {
+		for k, v := range n.Metadata {
 			switch k {
-			case "Type", "IfIndex", "State", "TID":
+			case "Type", "IfIndex", "State", "TID", "IPV4", "IPV6":
 				label += fmt.Sprintf("\\n%s = %v", k, v)
 			}
 		}
@@ -77,8 +77,8 @@ func (t *TopologyAPI) graphToDot(w http.ResponseWriter, g *graph.Graph) {
 	}
 
 	for _, e := range g.GetEdges(nil) {
-		parent := nodeMap[e.GetParent()]
-		child := nodeMap[e.GetChild()]
+		parent := nodeMap[e.Parent]
+		child := nodeMap[e.Child]
 		if parent == nil || child == nil {
 			continue
 		}
@@ -198,7 +198,7 @@ func (t *TopologyAPI) topologySearch(w http.ResponseWriter, r *auth.Authenticate
 	}
 }
 
-func (t *TopologyAPI) registerEndpoints(r *shttp.Server) {
+func (t *TopologyAPI) registerEndpoints(r *shttp.Server, authBackend shttp.AuthenticationBackend) {
 	routes := []shttp.Route{
 		{
 			Name:        "TopologiesIndex",
@@ -214,15 +214,15 @@ func (t *TopologyAPI) registerEndpoints(r *shttp.Server) {
 		},
 	}
 
-	r.RegisterRoutes(routes)
+	r.RegisterRoutes(routes, authBackend)
 }
 
 // RegisterTopologyAPI registers a new topology query API
-func RegisterTopologyAPI(r *shttp.Server, g *graph.Graph, parser *traversal.GremlinTraversalParser) {
+func RegisterTopologyAPI(r *shttp.Server, g *graph.Graph, parser *traversal.GremlinTraversalParser, authBackend shttp.AuthenticationBackend) {
 	t := &TopologyAPI{
 		gremlinParser: parser,
 		graph:         g,
 	}
 
-	t.registerEndpoints(r)
+	t.registerEndpoints(r, authBackend)
 }

@@ -23,6 +23,7 @@
 package ovsdb
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -33,18 +34,18 @@ import (
 	"github.com/skydive-project/skydive/common"
 	"github.com/skydive-project/skydive/config"
 	"github.com/skydive-project/skydive/filters"
+	"github.com/skydive-project/skydive/graffiti/graph"
 	"github.com/skydive-project/skydive/logging"
-	"github.com/skydive-project/skydive/ovs"
+	ovsdb "github.com/skydive-project/skydive/ovs"
 	"github.com/skydive-project/skydive/topology"
-	"github.com/skydive-project/skydive/topology/graph"
 )
 
 var (
 	patchMetadata = graph.Metadata{"RelationType": "layer2", "Type": "patch"}
 )
 
-// OvsdbProbe describes a probe that reads OVS database and updates the graph
-type OvsdbProbe struct {
+// Probe describes a probe that reads OVS database and updates the graph
+type Probe struct {
 	sync.Mutex
 	Graph        *graph.Graph
 	Root         *graph.Node
@@ -55,6 +56,7 @@ type OvsdbProbe struct {
 	intfToPort   map[string]*graph.Node
 	portToIntf   map[string]*graph.Node
 	portToBridge map[string]*graph.Node
+	cancel       context.CancelFunc
 }
 
 func isOvsInterfaceType(t string) bool {
@@ -75,26 +77,46 @@ func isOvsDrivenInterface(intf *graph.Node) bool {
 	return isOvsInterfaceType(t)
 }
 
+// OnConnected event
+func (o *Probe) OnConnected(monitor *ovsdb.OvsMonitor) {
+}
+
+// OnDisconnected event
+func (o *Probe) OnDisconnected(monitor *ovsdb.OvsMonitor) {
+}
+
 // OnOvsBridgeUpdate event
-func (o *OvsdbProbe) OnOvsBridgeUpdate(monitor *ovsdb.OvsMonitor, uuid string, row *libovsdb.RowUpdate) {
+func (o *Probe) OnOvsBridgeUpdate(monitor *ovsdb.OvsMonitor, uuid string, row *libovsdb.RowUpdate) {
 	o.OnOvsBridgeAdd(monitor, uuid, row)
 }
 
 // OnOvsBridgeAdd event
-func (o *OvsdbProbe) OnOvsBridgeAdd(monitor *ovsdb.OvsMonitor, uuid string, row *libovsdb.RowUpdate) {
+func (o *Probe) OnOvsBridgeAdd(monitor *ovsdb.OvsMonitor, uuid string, row *libovsdb.RowUpdate) {
 	o.Lock()
 	defer o.Unlock()
 
 	name := row.New.Fields["name"].(string)
 
 	o.Graph.Lock()
-	defer o.Graph.Unlock()
-
 	bridge := o.Graph.LookupFirstNode(graph.Metadata{"UUID": uuid})
 	if bridge == nil {
-		bridge = o.Graph.NewNode(graph.GenID(), graph.Metadata{"Name": name, "UUID": uuid, "Type": "ovsbridge"})
+		var err error
+
+		bridge, err = o.Graph.NewNode(graph.GenID(), graph.Metadata{"Name": name, "UUID": uuid, "Type": "ovsbridge"})
+		if err != nil {
+			logging.GetLogger().Error(err)
+			return
+		}
 		topology.AddOwnershipLink(o.Graph, o.Root, bridge, nil)
 	}
+
+	tr := o.Graph.StartMetadataTransaction(bridge)
+
+	otherConfig := row.New.Fields["other_config"].(libovsdb.OvsMap)
+	for k, v := range otherConfig.GoMap {
+		tr.AddMetadata("Ovs.OtherConfig."+k.(string), v.(string))
+	}
+	tr.Commit()
 
 	switch row.New.Fields["ports"].(type) {
 	case libovsdb.OvsSet:
@@ -130,25 +152,27 @@ func (o *OvsdbProbe) OnOvsBridgeAdd(monitor *ovsdb.OvsMonitor, uuid string, row 
 	if o.OvsOfProbe != nil {
 		o.OvsOfProbe.OnOvsBridgeAdd(bridge)
 	}
+	o.Graph.Unlock()
 }
 
 // OnOvsBridgeDel event
-func (o *OvsdbProbe) OnOvsBridgeDel(monitor *ovsdb.OvsMonitor, uuid string, row *libovsdb.RowUpdate) {
+func (o *Probe) OnOvsBridgeDel(monitor *ovsdb.OvsMonitor, uuid string, row *libovsdb.RowUpdate) {
+	if o.OvsOfProbe != nil {
+		o.OvsOfProbe.OnOvsBridgeDel(uuid)
+	}
 	o.Graph.Lock()
 	defer o.Graph.Unlock()
-
 	bridge := o.Graph.LookupFirstNode(graph.Metadata{"UUID": uuid})
-	if o.OvsOfProbe != nil {
-		o.OvsOfProbe.OnOvsBridgeDel(uuid, bridge)
-	}
 	if bridge != nil {
-		o.Graph.DelNode(bridge)
+		if err := o.Graph.DelNode(bridge); err != nil {
+			logging.GetLogger().Error(err)
+		}
 	}
 }
 
 // linkIntfTOBridge having ifindex set to 0 (not handled by netlink) or being in
 // error
-func (o *OvsdbProbe) linkIntfTOBridge(bridge, intf *graph.Node) {
+func (o *Probe) linkIntfTOBridge(bridge, intf *graph.Node) {
 	if isOvsDrivenInterface(intf) && !topology.IsOwnershipLinked(o.Graph, intf) {
 		topology.AddOwnershipLink(o.Graph, bridge, intf, nil)
 	}
@@ -241,7 +265,7 @@ func columnInt64Value(row *libovsdb.Row, col string) int64 {
 }
 
 // OnOvsInterfaceAdd event
-func (o *OvsdbProbe) OnOvsInterfaceAdd(monitor *ovsdb.OvsMonitor, uuid string, row *libovsdb.RowUpdate) {
+func (o *Probe) OnOvsInterfaceAdd(monitor *ovsdb.OvsMonitor, uuid string, row *libovsdb.RowUpdate) {
 	o.Lock()
 	defer o.Unlock()
 
@@ -277,21 +301,29 @@ func (o *OvsdbProbe) OnOvsInterfaceAdd(monitor *ovsdb.OvsMonitor, uuid string, r
 
 		if intf == nil {
 			// no already inserted ovs interface but maybe already detected by netlink
-			intf = o.Graph.LookupFirstNode(graph.NewGraphElementFilter(andFilter))
+			intf = o.Graph.LookupFirstNode(graph.NewElementFilter(andFilter))
 		} else {
 			// if there is a interface with the same MAC, name and optionally
 			// the same ifindex but having another ID, it means that ovs and
 			// netlink have seen the same interface. In order to keep only
 			// one interface we delete the ovs one and use the netlink one.
-			if nintf := o.Graph.LookupFirstNode(graph.NewGraphElementFilter(andFilter)); nintf != nil && intf.ID != nintf.ID {
-				o.Graph.DelNode(intf)
+			if nintf := o.Graph.LookupFirstNode(graph.NewElementFilter(andFilter)); nintf != nil && intf.ID != nintf.ID {
+				if err := o.Graph.DelNode(intf); err != nil {
+					logging.GetLogger().Error(err)
+				}
 				intf = nintf
 			}
 		}
 	}
 
 	if intf == nil {
-		intf = o.Graph.NewNode(graph.GenID(), graph.Metadata{"Name": name, "UUID": uuid})
+		var err error
+
+		intf, err = o.Graph.NewNode(graph.GenID(), graph.Metadata{"Name": name, "UUID": uuid})
+		if err != nil {
+			logging.GetLogger().Error(err)
+			return
+		}
 	}
 
 	tr := o.Graph.StartMetadataTransaction(intf)
@@ -414,12 +446,12 @@ func (o *OvsdbProbe) OnOvsInterfaceAdd(monitor *ovsdb.OvsMonitor, uuid string, r
 }
 
 // OnOvsInterfaceUpdate event
-func (o *OvsdbProbe) OnOvsInterfaceUpdate(monitor *ovsdb.OvsMonitor, uuid string, row *libovsdb.RowUpdate) {
+func (o *Probe) OnOvsInterfaceUpdate(monitor *ovsdb.OvsMonitor, uuid string, row *libovsdb.RowUpdate) {
 	o.OnOvsInterfaceAdd(monitor, uuid, row)
 }
 
 // OnOvsInterfaceDel event
-func (o *OvsdbProbe) OnOvsInterfaceDel(monitor *ovsdb.OvsMonitor, uuid string, row *libovsdb.RowUpdate) {
+func (o *Probe) OnOvsInterfaceDel(monitor *ovsdb.OvsMonitor, uuid string, row *libovsdb.RowUpdate) {
 	o.Lock()
 	defer o.Unlock()
 
@@ -433,7 +465,9 @@ func (o *OvsdbProbe) OnOvsInterfaceDel(monitor *ovsdb.OvsMonitor, uuid string, r
 
 	// do not delete if not an openvswitch interface
 	if driver, _ := intf.GetFieldString("Driver"); driver == "openvswitch" {
-		o.Graph.DelNode(intf)
+		if err := o.Graph.DelNode(intf); err != nil {
+			logging.GetLogger().Error(err)
+		}
 	}
 
 	delete(o.uuidToIntf, uuid)
@@ -441,7 +475,7 @@ func (o *OvsdbProbe) OnOvsInterfaceDel(monitor *ovsdb.OvsMonitor, uuid string, r
 }
 
 // OnOvsPortAdd event
-func (o *OvsdbProbe) OnOvsPortAdd(monitor *ovsdb.OvsMonitor, uuid string, row *libovsdb.RowUpdate) {
+func (o *Probe) OnOvsPortAdd(monitor *ovsdb.OvsMonitor, uuid string, row *libovsdb.RowUpdate) {
 	o.Lock()
 	defer o.Unlock()
 
@@ -450,11 +484,19 @@ func (o *OvsdbProbe) OnOvsPortAdd(monitor *ovsdb.OvsMonitor, uuid string, row *l
 
 	port, ok := o.uuidToPort[uuid]
 	if !ok {
-		port = o.Graph.NewNode(graph.GenID(), graph.Metadata{
+		var err error
+
+		port, err = o.Graph.NewNode(graph.GenID(), graph.Metadata{
 			"UUID": uuid,
 			"Name": row.New.Fields["name"].(string),
 			"Type": "ovsport",
 		})
+
+		if err != nil {
+			logging.GetLogger().Error(err)
+			return
+		}
+
 		o.uuidToPort[uuid] = port
 	}
 
@@ -480,6 +522,11 @@ func (o *OvsdbProbe) OnOvsPortAdd(monitor *ovsdb.OvsMonitor, uuid string, row *l
 	extIds := row.New.Fields["external_ids"].(libovsdb.OvsMap)
 	for k, v := range extIds.GoMap {
 		tr.AddMetadata("ExtID."+k.(string), v.(string))
+	}
+
+	otherConfig := row.New.Fields["other_config"].(libovsdb.OvsMap)
+	for k, v := range otherConfig.GoMap {
+		tr.AddMetadata("Ovs.OtherConfig."+k.(string), v.(string))
 	}
 
 	// vlan tag
@@ -545,12 +592,12 @@ func (o *OvsdbProbe) OnOvsPortAdd(monitor *ovsdb.OvsMonitor, uuid string, row *l
 }
 
 // OnOvsPortUpdate event
-func (o *OvsdbProbe) OnOvsPortUpdate(monitor *ovsdb.OvsMonitor, uuid string, row *libovsdb.RowUpdate) {
+func (o *Probe) OnOvsPortUpdate(monitor *ovsdb.OvsMonitor, uuid string, row *libovsdb.RowUpdate) {
 	o.OnOvsPortAdd(monitor, uuid, row)
 }
 
 // OnOvsPortDel event
-func (o *OvsdbProbe) OnOvsPortDel(monitor *ovsdb.OvsMonitor, uuid string, row *libovsdb.RowUpdate) {
+func (o *Probe) OnOvsPortDel(monitor *ovsdb.OvsMonitor, uuid string, row *libovsdb.RowUpdate) {
 	o.Lock()
 	defer o.Unlock()
 
@@ -562,7 +609,9 @@ func (o *OvsdbProbe) OnOvsPortDel(monitor *ovsdb.OvsMonitor, uuid string, row *l
 	o.Graph.Lock()
 	defer o.Graph.Unlock()
 
-	o.Graph.DelNode(port)
+	if err := o.Graph.DelNode(port); err != nil {
+		logging.GetLogger().Error(err)
+	}
 
 	delete(o.uuidToPort, uuid)
 	delete(o.portToBridge, uuid)
@@ -570,22 +619,25 @@ func (o *OvsdbProbe) OnOvsPortDel(monitor *ovsdb.OvsMonitor, uuid string, row *l
 }
 
 // Start the probe
-func (o *OvsdbProbe) Start() {
+func (o *Probe) Start() {
+	o.OvsMon.AddMonitorHandler(o)
 	o.OvsMon.StartMonitoring()
 }
 
 // Stop the probe
-func (o *OvsdbProbe) Stop() {
+func (o *Probe) Stop() {
 	o.OvsMon.StopMonitoring()
+	o.cancel()
 }
 
-// NewOvsdbProbe creates a new graph OVS database probe
-func NewOvsdbProbe(g *graph.Graph, n *graph.Node, p string, t string) *OvsdbProbe {
+// NewProbe creates a new graph OVS database probe
+func NewProbe(g *graph.Graph, n *graph.Node, p string, t string) *Probe {
 	mon := ovsdb.NewOvsMonitor(p, t)
 	mon.ExcludeColumn("*", "statistics")
 	mon.IncludeColumn("Interface", "statistics")
 
-	o := &OvsdbProbe{
+	ctx, cancel := context.WithCancel(context.Background())
+	o := &Probe{
 		Graph:        g,
 		Root:         n,
 		uuidToIntf:   make(map[string]*graph.Node),
@@ -594,15 +646,15 @@ func NewOvsdbProbe(g *graph.Graph, n *graph.Node, p string, t string) *OvsdbProb
 		portToIntf:   make(map[string]*graph.Node),
 		portToBridge: make(map[string]*graph.Node),
 		OvsMon:       mon,
-		OvsOfProbe:   NewOvsOfProbe(g, n, mon.Target),
+		OvsOfProbe:   NewOvsOfProbe(ctx, g, n, mon.Target),
+		cancel:       cancel,
 	}
-	o.OvsMon.AddMonitorHandler(o)
 
 	return o
 }
 
-// NewOvsdbProbeFromConfig creates a new probe based on configuration
-func NewOvsdbProbeFromConfig(g *graph.Graph, n *graph.Node) *OvsdbProbe {
+// NewProbeFromConfig creates a new probe based on configuration
+func NewProbeFromConfig(g *graph.Graph, n *graph.Node) *Probe {
 	address := config.GetString("ovs.ovsdb")
 
 	var protocol string
@@ -626,5 +678,5 @@ func NewOvsdbProbeFromConfig(g *graph.Graph, n *graph.Node) *OvsdbProbe {
 		target = fmt.Sprintf("%s:%d", sa.Addr, sa.Port)
 	}
 
-	return NewOvsdbProbe(g, n, protocol, target)
+	return NewProbe(g, n, protocol, target)
 }

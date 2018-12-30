@@ -36,7 +36,6 @@ import (
 	"github.com/skydive-project/skydive/flow"
 	g "github.com/skydive-project/skydive/gremlin"
 	shttp "github.com/skydive-project/skydive/http"
-	"github.com/skydive-project/skydive/tests/helper"
 )
 
 type seleniumHelper struct {
@@ -48,10 +47,28 @@ type seleniumHelper struct {
 	activeTabID      string
 	t                *testing.T
 	currVideoName    string
+	authOptions      *shttp.AuthenticationOpts
 }
 
 func (s *seleniumHelper) connect() error {
 	return s.webdriver.Get(fmt.Sprintf("http://%s:%d", s.addr, s.port))
+}
+
+func (s *seleniumHelper) login() error {
+	if err := s.fillTextBoxByID("username", s.authOptions.Username); err != nil {
+		return err
+	}
+
+	if err := s.fillTextBoxByID("password", s.authOptions.Password); err != nil {
+		return err
+	}
+
+	signin, err := s.findElement(selenium.ByID, "signin")
+	if err != nil {
+		return err
+	}
+
+	return signin.Click()
 }
 
 func (s *seleniumHelper) findElement(selection, xpath string) (el selenium.WebElement, err error) {
@@ -89,9 +106,7 @@ func (s *seleniumHelper) zoomFit() error {
 	if err != nil {
 		return err
 	}
-	fit.Click()
-
-	return nil
+	return fit.Click()
 }
 
 func (s *seleniumHelper) zoomOut() error {
@@ -521,20 +536,20 @@ func (s *seleniumHelper) moveOnByID(id string) error {
 }
 
 func (s *seleniumHelper) startVideoRecord(name string) {
-	cmds := []helper.Cmd{
+	cmds := []Cmd{
 		{"docker exec grid start-video", true},
 	}
-	helper.ExecCmds(s.t, cmds...)
+	execCmds(s.t, cmds...)
 	s.currVideoName = name
 }
 
 func (s *seleniumHelper) stopVideoRecord() {
-	cmds := []helper.Cmd{
+	cmds := []Cmd{
 		{"docker exec grid stop-video", true},
 		{"docker cp grid:/videos/. .", true},
 		{fmt.Sprintf("mv cdd.mp4 %s.mp4", s.currVideoName), true},
 	}
-	helper.ExecCmds(s.t, cmds...)
+	execCmds(s.t, cmds...)
 
 	s.currVideoName = ""
 }
@@ -542,20 +557,20 @@ func (s *seleniumHelper) stopVideoRecord() {
 func (s *seleniumHelper) quit() {
 	s.webdriver.Quit()
 
-	tearDownCmds := []helper.Cmd{
+	tearDownCmds := []Cmd{
 		{"docker stop grid", true},
 		{"docker rm -f grid", true},
 	}
-	helper.ExecCmds(s.t, tearDownCmds...)
+	execCmds(s.t, tearDownCmds...)
 }
 
-func newSeleniumHelper(t *testing.T, analyzerAddr string, analyzerPort int) (*seleniumHelper, error) {
-	setupCmds := []helper.Cmd{
+func newSeleniumHelper(t *testing.T, analyzerAddr string, analyzerPort int, authOptions *shttp.AuthenticationOpts) (*seleniumHelper, error) {
+	setupCmds := []Cmd{
 		{"docker pull skydive/cdd-docker-selenium", true},
 		{"docker run -d --name=grid -p 4444:24444 -p 5900:25900 -e --shm-size=1g -p 6080:26080 -e SCREEN_WIDTH=1600 -e SCREEN_HEIGHT=1000 -e NOVNC=true -e VIDEO_FILE_NAME=cdd skydive/cdd-docker-selenium", true},
 		{"docker exec grid wait_all_done 30s", true},
 	}
-	helper.ExecCmds(t, setupCmds...)
+	execCmds(t, setupCmds...)
 
 	caps := selenium.Capabilities{"browserName": "chrome"}
 	webdriver, err := selenium.NewRemote(caps, "http://localhost:4444/wd/hub")
@@ -567,7 +582,6 @@ func newSeleniumHelper(t *testing.T, analyzerAddr string, analyzerPort int) (*se
 
 	os.Setenv("SKYDIVE_ANALYZERS", fmt.Sprintf("%s:%d", analyzerAddr, analyzerPort))
 
-	authOptions := &shttp.AuthenticationOpts{}
 	gh := gclient.NewGremlinQueryHelper(authOptions)
 
 	sh := &seleniumHelper{
@@ -577,6 +591,7 @@ func newSeleniumHelper(t *testing.T, analyzerAddr string, analyzerPort int) (*se
 		gh:          gh,
 		activeTabID: "Captures",
 		t:           t,
+		authOptions: authOptions,
 	}
 
 	return sh, nil

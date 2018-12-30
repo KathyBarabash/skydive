@@ -26,8 +26,13 @@ import (
 	"errors"
 	"time"
 
-	shttp "github.com/skydive-project/skydive/http"
+	"github.com/skydive-project/skydive/common"
+	"github.com/skydive-project/skydive/flow"
+	"github.com/skydive-project/skydive/graffiti/graph"
+	"github.com/skydive-project/skydive/topology"
 )
+
+var schemaValidator *topology.SchemaValidator
 
 // Resource used as interface resources for each API
 type Resource interface {
@@ -68,34 +73,24 @@ func NewAlert() *Alert {
 	}
 }
 
-// AnalyzerStatus describes the status of an analyzer
-type AnalyzerStatus struct {
-	Agents      map[string]shttp.WSConnStatus
-	Peers       PeersStatus
-	Publishers  map[string]shttp.WSConnStatus
-	Subscribers map[string]shttp.WSConnStatus
-	Alerts      ElectionStatus
-	Captures    ElectionStatus
-	Probes      []string
-}
-
 // Capture describes a capture API
 type Capture struct {
 	BasicResource
-	GremlinQuery   string `json:"GremlinQuery,omitempty" valid:"isGremlinExpr"`
-	BPFFilter      string `json:"BPFFilter,omitempty" valid:"isBPFFilter"`
-	Name           string `json:"Name,omitempty"`
-	Description    string `json:"Description,omitempty"`
-	Type           string `json:"Type,omitempty"`
-	Count          int    `json:"Count"`
-	PCAPSocket     string `json:"PCAPSocket,omitempty"`
-	Port           int    `json:"Port,omitempty"`
-	RawPacketLimit int    `json:"RawPacketLimit,omitempty" valid:"isValidRawPacketLimit"`
-	HeaderSize     int    `json:"HeaderSize,omitempty" valid:"isValidCaptureHeaderSize"`
-	ExtraTCPMetric bool   `json:"ExtraTCPMetric"`
-	IPDefrag       bool   `json:"IPDefrag"`
-	ReassembleTCP  bool   `json:"ReassembleTCP"`
-	LayerKeyMode   string `json:"LayerKeyMode,omitempty" valid:"isValidLayerKeyMode"`
+	GremlinQuery   string           `json:"GremlinQuery,omitempty" valid:"isGremlinExpr"`
+	BPFFilter      string           `json:"BPFFilter,omitempty" valid:"isBPFFilter"`
+	Name           string           `json:"Name,omitempty"`
+	Description    string           `json:"Description,omitempty"`
+	Type           string           `json:"Type,omitempty"`
+	Count          int              `json:"Count"`
+	PCAPSocket     string           `json:"PCAPSocket,omitempty"`
+	Port           int              `json:"Port,omitempty"`
+	RawPacketLimit int              `json:"RawPacketLimit,omitempty" valid:"isValidRawPacketLimit"`
+	HeaderSize     int              `json:"HeaderSize,omitempty" valid:"isValidCaptureHeaderSize"`
+	ExtraTCPMetric bool             `json:"ExtraTCPMetric"`
+	IPDefrag       bool             `json:"IPDefrag"`
+	ReassembleTCP  bool             `json:"ReassembleTCP"`
+	LayerKeyMode   string           `json:"LayerKeyMode,omitempty" valid:"isValidLayerKeyMode"`
+	ExtraLayers    flow.ExtraLayers `json:"ExtraLayers,omitempty"`
 }
 
 // NewCapture creates a new capture
@@ -106,30 +101,71 @@ func NewCapture(query string, bpfFilter string) *Capture {
 	}
 }
 
-// ElectionStatus describes the status of an election
-type ElectionStatus struct {
-	IsMaster bool
+// EdgeRule describes a edge rule
+type EdgeRule struct {
+	BasicResource
+	Name        string
+	Description string
+	Src         string `valid:"isGremlinExpr"`
+	Dst         string `valid:"isGremlinExpr"`
+	Metadata    graph.Metadata
+}
+
+// Validate verifies the nodedgee rule does not create invalid edges
+func (e *EdgeRule) Validate() error {
+	n1 := graph.CreateNode(graph.GenID(), nil, graph.TimeUTC(), "", common.UnknownService)
+	n2 := graph.CreateNode(graph.GenID(), nil, graph.TimeUTC(), "", common.UnknownService)
+	edge := graph.CreateEdge(graph.GenID(), n1, n2, e.Metadata, graph.TimeUTC(), "", common.UnknownService)
+	return schemaValidator.ValidateEdge(edge)
+}
+
+// NodeRule describes a node rule
+type NodeRule struct {
+	BasicResource
+	Name        string
+	Description string
+	Metadata    graph.Metadata
+	Action      string `valid:"regexp=^(create|update)$"`
+	Query       string `valid:"isGremlinOrEmpty"`
+}
+
+// Validate verifies the node rule does not create invalid node or change
+// important attributes of an existing node
+func (n *NodeRule) Validate() error {
+	switch n.Action {
+	case "create":
+		// TODO: we should modify the JSON schema so that we can validate only the metadata
+		node := graph.CreateNode(graph.GenID(), n.Metadata, graph.TimeUTC(), "", common.UnknownService)
+		return schemaValidator.ValidateNode(node)
+	case "update":
+		if n.Metadata["Type"] != nil || n.Metadata["Name"] != nil {
+			return errors.New("Name and Type fields can not be changed")
+		}
+	}
+	return nil
 }
 
 // PacketInjection packet injector API parameters
 type PacketInjection struct {
 	BasicResource
-	Src        string
-	Dst        string
-	SrcIP      string
-	DstIP      string
-	SrcMAC     string
-	DstMAC     string
-	SrcPort    int64
-	DstPort    int64
-	Type       string
-	Payload    string
-	TrackingID string
-	ICMPID     int64
-	Count      int64
-	Interval   int64
-	Increment  bool
-	StartTime  time.Time
+	Src              string
+	Dst              string
+	SrcIP            string
+	DstIP            string
+	SrcMAC           string
+	DstMAC           string
+	SrcPort          int64
+	DstPort          int64
+	Type             string
+	Payload          string
+	TrackingID       string
+	ICMPID           int64
+	Count            int64
+	Interval         int64
+	Increment        bool
+	IncrementPayload int64
+	StartTime        time.Time
+	Pcap             []byte
 }
 
 // Validate verifies the packet injection type is supported
@@ -141,39 +177,18 @@ func (pi *PacketInjection) Validate() error {
 	return nil
 }
 
-// PeersStatus describes the state of a peer
-type PeersStatus struct {
-	Incomers map[string]shttp.WSConnStatus
-	Outgoers map[string]shttp.WSConnStatus
-}
-
 // TopologyParam topology API parameter
 type TopologyParam struct {
 	GremlinQuery string `json:"GremlinQuery,omitempty" valid:"isGremlinExpr"`
 }
 
-// UserMetadata describes a user metadata
-type UserMetadata struct {
-	BasicResource
-	GremlinQuery string `valid:"isGremlinExpr"`
-	Key          string `valid:"nonzero"`
-	Value        string `valid:"nonzero"`
-}
-
-// NewUserMetadata creates a new user metadata
-func NewUserMetadata(query string, key string, value string) *UserMetadata {
-	return &UserMetadata{
-		GremlinQuery: query,
-		Key:          key,
-		Value:        value,
-	}
-}
-
+// WorkflowChoice describes one value within a choice
 type WorkflowChoice struct {
 	Value       string `yaml:"value"`
 	Description string `yaml:"description"`
 }
 
+// WorkflowParam describes a workflow parameter
 type WorkflowParam struct {
 	Name        string
 	Description string
@@ -189,4 +204,11 @@ type Workflow struct {
 	Description   string          `yaml:"description"`
 	Parameters    []WorkflowParam `yaml:"parameters"`
 	Source        string          `valid:"isValidWorkflow" yaml:"source"`
+}
+
+func init() {
+	var err error
+	if schemaValidator, err = topology.NewSchemaValidator(); err != nil {
+		panic(err)
+	}
 }

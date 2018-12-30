@@ -31,11 +31,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/olivere/elastic"
 	"github.com/spaolacci/murmur3"
 
 	"github.com/skydive-project/skydive/common"
-	"github.com/skydive-project/skydive/etcd"
 	"github.com/skydive-project/skydive/logging"
 )
 
@@ -47,18 +45,17 @@ var (
 )
 
 type rollIndexService struct {
-	client      *elastic.Client
+	client      *Client
 	config      Config
 	indices     []Index
 	triggerRoll chan bool
 	quit        chan bool
-	etcdClient  *etcd.Client
-	elector     *etcd.MasterElector
+	election    common.MasterElection
 }
 
 func (r *rollIndexService) cleanup(index Index) {
 	if r.config.IndicesLimit != 0 {
-		resp, err := r.client.IndexGet(index.IndexWildcard()).Do(context.Background())
+		resp, err := r.client.esClient.IndexGet(index.IndexWildcard()).Do(context.Background())
 		if err != nil {
 			logging.GetLogger().Errorf("Error while rolling index %s: %s", index.Alias(), err)
 			return
@@ -80,7 +77,7 @@ func (r *rollIndexService) cleanup(index Index) {
 		// need to reindex first, thus won't delete directly but after the task finished
 		if len(toDelete) > 0 {
 			logging.GetLogger().Infof("Deleted indices %s", strings.Join(toDelete, ", "))
-			if _, err := r.client.DeleteIndex(toDelete...).Do(context.Background()); err != nil {
+			if _, err := r.client.esClient.DeleteIndex(toDelete...).Do(context.Background()); err != nil {
 				logging.GetLogger().Errorf("Error while deleting indices: %s", err)
 			}
 		}
@@ -91,7 +88,7 @@ func (r *rollIndexService) roll(force bool) {
 	logging.GetLogger().Debug("Start rolling indices...")
 
 	for _, index := range r.indices {
-		ri := r.client.RolloverIndex(index.Alias())
+		ri := r.client.esClient.RolloverIndex(index.Alias())
 
 		needToRoll := false
 		if force {
@@ -145,7 +142,7 @@ func (r *rollIndexService) run() {
 		case <-r.triggerRoll:
 			r.roll(true)
 		case <-timer.C:
-			if r.elector == nil || r.elector.IsMaster() {
+			if r.election == nil || r.election.IsMaster() {
 				r.roll(false)
 			}
 		case <-r.quit:
@@ -154,20 +151,9 @@ func (r *rollIndexService) run() {
 	}
 }
 
-func (r *rollIndexService) indicesUUID() string {
-	hasher := murmur3.New64()
-	for _, index := range r.indices {
-		hasher.Write([]byte(index.Name))
-	}
-
-	return hex.EncodeToString(hasher.Sum(nil))[0:8]
-}
-
 func (r *rollIndexService) start() {
-	if r.etcdClient != nil {
-		key := fmt.Sprintf("es-rolling-index:%s", r.indicesUUID())
-		r.elector = etcd.NewMasterElectorFromConfig(common.AnalyzerService, key, r.etcdClient)
-		r.elector.StartAndWait()
+	if r.election != nil {
+		r.election.StartAndWait()
 	}
 
 	go r.run()
@@ -185,13 +171,21 @@ func SetRollingRate(rate time.Duration) {
 	rollingRateLock.Unlock()
 }
 
-func newRollIndexService(client *elastic.Client, indices []Index, cfg Config, etcdClient *etcd.Client) *rollIndexService {
+func newRollIndexService(client *Client, indices []Index, cfg Config, electionService common.MasterElectionService) *rollIndexService {
+	hasher := murmur3.New64()
+	for _, index := range indices {
+		hasher.Write([]byte(index.Name))
+	}
+	hash := hex.EncodeToString(hasher.Sum(nil))[0:8]
+	key := fmt.Sprintf("es-rolling-index:%s", hash)
+	election := electionService.NewElection(key)
+
 	return &rollIndexService{
 		client:      client,
 		config:      cfg,
 		quit:        make(chan bool, 1),
 		triggerRoll: make(chan bool, 1),
 		indices:     indices,
-		etcdClient:  etcdClient,
+		election:    election,
 	}
 }

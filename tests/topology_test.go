@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"reflect"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -35,20 +36,21 @@ import (
 	"github.com/skydive-project/skydive/api/types"
 	"github.com/skydive-project/skydive/common"
 	"github.com/skydive-project/skydive/config"
+	"github.com/skydive-project/skydive/graffiti/graph"
 	g "github.com/skydive-project/skydive/gremlin"
 	shttp "github.com/skydive-project/skydive/http"
-	"github.com/skydive-project/skydive/tests/helper"
 	"github.com/skydive-project/skydive/topology"
-	"github.com/skydive-project/skydive/topology/graph"
+	"github.com/skydive-project/skydive/topology/probes/netlink"
+	ws "github.com/skydive-project/skydive/websocket"
 )
 
 func TestBridgeOVS(t *testing.T) {
 	test := &Test{
-		setupCmds: []helper.Cmd{
+		setupCmds: []Cmd{
 			{"ovs-vsctl add-br br-testbovs1", true},
 		},
 
-		tearDownCmds: []helper.Cmd{
+		tearDownCmds: []Cmd{
 			{"ovs-vsctl del-br br-testbovs1", true},
 		},
 
@@ -82,7 +84,7 @@ func TestBridgeOVS(t *testing.T) {
 
 func TestPatchOVS(t *testing.T) {
 	test := &Test{
-		setupCmds: []helper.Cmd{
+		setupCmds: []Cmd{
 			{"ovs-vsctl add-br br-testpaovs1", true},
 			{"ovs-vsctl add-br br-testpaovs2", true},
 			{"ovs-vsctl add-port br-testpaovs1 patch-br-testpaovs2 -- set interface patch-br-testpaovs2 type=patch", true},
@@ -91,7 +93,7 @@ func TestPatchOVS(t *testing.T) {
 			{"ovs-vsctl set interface patch-br-testpaovs1 option:peer=patch-br-testpaovs2", true},
 		},
 
-		tearDownCmds: []helper.Cmd{
+		tearDownCmds: []Cmd{
 			{"ovs-vsctl del-br br-testpaovs1", true},
 			{"ovs-vsctl del-br br-testpaovs2", true},
 		},
@@ -131,12 +133,12 @@ func TestPatchOVS(t *testing.T) {
 
 func TestInterfaceOVS(t *testing.T) {
 	test := &Test{
-		setupCmds: []helper.Cmd{
+		setupCmds: []Cmd{
 			{"ovs-vsctl add-br br-test1", true},
 			{"ovs-vsctl add-port br-test1 intf1 -- set interface intf1 type=internal", true},
 		},
 
-		tearDownCmds: []helper.Cmd{
+		tearDownCmds: []Cmd{
 			{"ovs-vsctl del-br br-test1", true},
 		},
 
@@ -174,11 +176,11 @@ func TestInterfaceOVS(t *testing.T) {
 
 func TestVeth(t *testing.T) {
 	test := &Test{
-		setupCmds: []helper.Cmd{
+		setupCmds: []Cmd{
 			{"ip l add vm1-veth0 type veth peer name vm1-veth1", true},
 		},
 
-		tearDownCmds: []helper.Cmd{
+		tearDownCmds: []Cmd{
 			{"ip link del vm1-veth0", true},
 		},
 
@@ -204,13 +206,13 @@ func TestVeth(t *testing.T) {
 
 func TestBridge(t *testing.T) {
 	test := &Test{
-		setupCmds: []helper.Cmd{
+		setupCmds: []Cmd{
 			{"brctl addbr br-test", true},
 			{"ip tuntap add mode tap dev intf1", true},
 			{"brctl addif br-test intf1", true},
 		},
 
-		tearDownCmds: []helper.Cmd{
+		tearDownCmds: []Cmd{
 			{"brctl delbr br-test", true},
 			{"ip link del intf1", true},
 		},
@@ -239,13 +241,13 @@ func TestBridge(t *testing.T) {
 
 func TestMacNameUpdate(t *testing.T) {
 	test := &Test{
-		setupCmds: []helper.Cmd{
+		setupCmds: []Cmd{
 			{"ip l add vm1-veth0 type veth peer name vm1-veth1", true},
 			{"ip l set vm1-veth1 name vm1-veth2", true},
 			{"ip l set vm1-veth2 address 00:00:00:00:00:aa", true},
 		},
 
-		tearDownCmds: []helper.Cmd{
+		tearDownCmds: []Cmd{
 			{"ip link del vm1-veth0", true},
 		},
 
@@ -278,11 +280,11 @@ func TestMacNameUpdate(t *testing.T) {
 
 func TestNameSpace(t *testing.T) {
 	test := &Test{
-		setupCmds: []helper.Cmd{
+		setupCmds: []Cmd{
 			{"ip netns add ns1", true},
 		},
 
-		tearDownCmds: []helper.Cmd{
+		tearDownCmds: []Cmd{
 			{"ip netns del ns1", true},
 		},
 
@@ -310,12 +312,12 @@ func TestNameSpace(t *testing.T) {
 
 func TestNameSpaceVeth(t *testing.T) {
 	test := &Test{
-		setupCmds: []helper.Cmd{
+		setupCmds: []Cmd{
 			{"ip netns add ns1", true},
 			{"ip l add vm1-veth0 type veth peer name vm1-veth1 netns ns1", true},
 		},
 
-		tearDownCmds: []helper.Cmd{
+		tearDownCmds: []Cmd{
 			{"ip link del vm1-veth0", true},
 			{"ip netns del ns1", true},
 		},
@@ -344,14 +346,14 @@ func TestNameSpaceVeth(t *testing.T) {
 
 func TestNameSpaceOVSInterface(t *testing.T) {
 	test := &Test{
-		setupCmds: []helper.Cmd{
+		setupCmds: []Cmd{
 			{"ip netns add ns1", true},
 			{"ovs-vsctl add-br br-test1", true},
 			{"ovs-vsctl add-port br-test1 intf1 -- set interface intf1 type=internal", true},
 			{"ip l set intf1 netns ns1", true},
 		},
 
-		tearDownCmds: []helper.Cmd{
+		tearDownCmds: []Cmd{
 			{"ovs-vsctl del-br br-test1", true},
 			{"ip netns del ns1", true},
 		},
@@ -391,13 +393,13 @@ func TestInterfaceUpdate(t *testing.T) {
 	start := time.Now()
 
 	test := &Test{
-		setupCmds: []helper.Cmd{
+		setupCmds: []Cmd{
 			{"ip netns add iu", true},
 			{"sleep 5", false},
 			{"ip netns exec iu ip link set lo up", true},
 		},
 
-		tearDownCmds: []helper.Cmd{
+		tearDownCmds: []Cmd{
 			{"ip netns del iu", true},
 		},
 
@@ -421,12 +423,8 @@ func TestInterfaceUpdate(t *testing.T) {
 			hasDown := false
 			hasUp := false
 			for i := range nodes {
-				if !hasDown && nodes[i].Metadata()["State"].(string) == "DOWN" {
-					hasDown = true
-				}
-				if !hasUp && nodes[i].Metadata()["State"].(string) == "UP" {
-					hasUp = true
-				}
+				hasDown = hasDown || topology.IsInterfaceUp(nodes[i])
+				hasUp = hasUp || topology.IsInterfaceUp(nodes[i])
 			}
 
 			if !hasUp || !hasDown {
@@ -442,21 +440,21 @@ func TestInterfaceUpdate(t *testing.T) {
 
 func TestInterfaceMetrics(t *testing.T) {
 	test := &Test{
-		setupCmds: []helper.Cmd{
+		setupCmds: []Cmd{
 			{"ip netns add im", true},
 			{"ip netns exec im ip link set lo up", true},
 			{"sleep 2", false},
 		},
 
 		setupFunction: func(c *TestContext) error {
-			helper.ExecCmds(t,
-				helper.Cmd{Cmd: "ip netns exec im ping -c 15 127.0.0.1", Check: true},
-				helper.Cmd{Cmd: "sleep 5", Check: false},
+			execCmds(t,
+				Cmd{Cmd: "ip netns exec im ping -c 15 127.0.0.1", Check: true},
+				Cmd{Cmd: "sleep 5", Check: false},
 			)
 			return nil
 		},
 
-		tearDownCmds: []helper.Cmd{
+		tearDownCmds: []Cmd{
 			{"ip netns del im", true},
 		},
 
@@ -467,7 +465,7 @@ func TestInterfaceMetrics(t *testing.T) {
 			gremlin := c.gremlin.Context(c.startTime, c.startTime.Unix()-c.setupTime.Unix()+5)
 			gremlin = gremlin.V().Has("Name", "im", "Type", "netns").Out().Has("Name", "lo").Metrics().Aggregates(10)
 
-			metrics, err := gh.GetMetrics(gremlin)
+			metrics, err := gh.GetInterfaceMetrics(gremlin)
 			if err != nil {
 				return err
 			}
@@ -480,7 +478,7 @@ func TestInterfaceMetrics(t *testing.T) {
 				return fmt.Errorf("Should have more metrics entry, got %+v", metrics["Aggregated"])
 			}
 
-			var start, tx int64
+			var start, totalTx int64
 			for _, m := range metrics["Aggregated"] {
 				if m.GetStart() < start {
 					j, _ := json.MarshalIndent(metrics, "", "\t")
@@ -488,26 +486,25 @@ func TestInterfaceMetrics(t *testing.T) {
 				}
 				start = m.GetStart()
 
-				im := m.(*topology.InterfaceMetric)
-				tx += im.TxPackets
+				tx, _ := m.GetFieldInt64("TxPackets")
+				totalTx += tx
 			}
 
 			// due to ratio applied during the aggregation we can't expect to get exactly
 			// the sum of the metrics.
-			if tx <= 25 {
-				return fmt.Errorf("Expected at least TxPackets, got %d", tx)
+			if totalTx <= 25 {
+				return fmt.Errorf("Expected at least TxPackets, got %d", totalTx)
 			}
 
 			gremlin += `.Sum()`
 
-			m, err := gh.GetMetric(gremlin)
+			m, err := gh.GetInterfaceMetric(gremlin)
 			if err != nil {
 				return fmt.Errorf("Could not find metrics with: %s", gremlin)
 			}
 
-			im := m.(*topology.InterfaceMetric)
-			if im.TxPackets != tx {
-				return fmt.Errorf("Sum error %d vs %d", im.TxPackets, tx)
+			if tx, _ := m.GetFieldInt64("TxPackets"); tx != totalTx {
+				return fmt.Errorf("Sum error %d vs %d", totalTx, tx)
 			}
 
 			return nil
@@ -519,7 +516,7 @@ func TestInterfaceMetrics(t *testing.T) {
 
 func TestOVSOwnershipLink(t *testing.T) {
 	test := &Test{
-		setupCmds: []helper.Cmd{
+		setupCmds: []Cmd{
 			{"ovs-vsctl add-br br-owner", true},
 			{"ovs-vsctl add-port br-owner patch-br-owner -- set interface patch-br-owner type=patch", true},
 			{"ovs-vsctl add-port br-owner gre-br-owner -- set interface gre-br-owner type=gre", true},
@@ -528,7 +525,7 @@ func TestOVSOwnershipLink(t *testing.T) {
 			{"ovs-vsctl add-port br-owner intf-owner -- set interface intf-owner type=internal", true},
 		},
 
-		tearDownCmds: []helper.Cmd{
+		tearDownCmds: []Cmd{
 			{"ovs-vsctl del-br br-owner", true},
 		},
 
@@ -571,11 +568,11 @@ func TestOVSOwnershipLink(t *testing.T) {
 }
 
 type TopologyInjecter struct {
-	shttp.DefaultWSSpeakerEventHandler
+	ws.DefaultSpeakerEventHandler
 	connected int32
 }
 
-func (t *TopologyInjecter) OnConnected(c shttp.WSSpeaker) {
+func (t *TopologyInjecter) OnConnected(c ws.Speaker) {
 	atomic.StoreInt32(&t.connected, 1)
 }
 
@@ -589,14 +586,13 @@ func TestQueryMetadata(t *testing.T) {
 			}
 
 			hostname, _ := os.Hostname()
-			wspool := shttp.NewWSStructClientPool("TestQueryMetadata")
+			wspool := ws.NewStructClientPool("TestQueryMetadata")
 			for _, sa := range addresses {
-				authClient := shttp.NewAuthenticationClient(config.GetURL("http", sa.Addr, sa.Port, ""), authOptions)
-				client := shttp.NewWSClient(hostname+"-cli", common.UnknownService, config.GetURL("ws", sa.Addr, sa.Port, "/ws/publisher"), authClient, http.Header{}, 1000)
+				client := ws.NewClient(hostname+"-cli", common.UnknownService, config.GetURL("ws", sa.Addr, sa.Port, "/ws/publisher"), authOptions, http.Header{}, 1000, true, nil)
 				wspool.AddClient(client)
 			}
 
-			masterElection := shttp.NewWSMasterElection(wspool)
+			masterElection := ws.NewMasterElection(wspool)
 
 			eventHandler := &TopologyInjecter{}
 			wspool.AddEventHandler(eventHandler)
@@ -613,31 +609,29 @@ func TestQueryMetadata(t *testing.T) {
 				return err
 			}
 
-			m := map[string]interface{}{
-				"ID":   "123",
-				"Host": "test",
-				"Metadata": map[string]interface{}{
-					"A": map[string]interface{}{
-						"B": map[string]interface{}{
-							"C": 123,
-							"D": []interface{}{1, 2, 3},
-						},
-						"F": map[string]interface{}{
-							"G": 123,
-						},
+			m := graph.Metadata{
+				"A": map[string]interface{}{
+					"B": map[string]interface{}{
+						"C": 123,
+						"D": []interface{}{1, 2, 3},
+						"E": []interface{}{"a", "b", "c"},
+					},
+					"F": map[string]interface{}{
+						"G": 123,
+						"H": []interface{}{true, true},
 					},
 				},
 			}
-			n := new(graph.Node)
-			n.Decode(m)
+			n := graph.CreateNode(graph.Identifier("123"), m, graph.TimeUTC(), "test", common.AgentService)
 
 			// The first message should be rejected as it has no 'Type' attribute
-			msg := shttp.NewWSStructMessage(graph.Namespace, graph.NodeAddedMsgType, n)
+			msg := ws.NewStructMessage(graph.Namespace, graph.NodeAddedMsgType, n)
 			masterElection.SendMessageToMaster(msg)
 
-			m["Metadata"].(map[string]interface{})["Type"] = "external"
-			n.Decode(m)
-			msg = shttp.NewWSStructMessage(graph.Namespace, graph.NodeAddedMsgType, n)
+			m.SetField("Type", "external")
+			m.SetField("Name", "testNode")
+
+			msg = ws.NewStructMessage(graph.Namespace, graph.NodeAddedMsgType, n)
 			masterElection.SendMessageToMaster(msg)
 
 			return nil
@@ -664,31 +658,83 @@ func TestQueryMetadata(t *testing.T) {
 				return err
 			}
 
-			return nil
+			_, err = gh.GetNode(prefix.V().Has("A.B.E", "b"))
+			if err != nil {
+				return err
+			}
+
+			_, err = gh.GetNode(prefix.V().Has("A.F.H", true))
+			return err
 		}},
 	}
 
 	RunTest(t, test)
 }
 
-//TestUserMetadata tests user metadata functionality
-func TestUserMetadata(t *testing.T) {
-	umd := types.NewUserMetadata(g.G.V().Has("Name", "br-umd", "Type", "ovsbridge").String(), "testKey", "testValue")
+func TestNodeRuleCreate(t *testing.T) {
+	nodeRule := &types.NodeRule{
+		Action:   "create",
+		Metadata: graph.Metadata{"Name": "TestNode", "Type": "fabric"},
+	}
+
 	test := &Test{
-		setupCmds: []helper.Cmd{
+		setupFunction: func(c *TestContext) error {
+			return c.client.Create("noderule", nodeRule)
+		},
+
+		tearDownFunction: func(c *TestContext) error {
+			c.client.Delete("noderule", nodeRule.ID())
+			return nil
+		},
+
+		mode: Replay,
+
+		checks: []CheckFunction{
+			func(c *CheckContext) error {
+				if _, err := c.gh.GetNode(c.gremlin.V().Has("Name", "TestNode")); err != nil {
+					return errors.New("Failed to find a node with name TestNode")
+				}
+
+				return nil
+			},
+
+			func(c *CheckContext) error {
+				c.client.Delete("noderule", nodeRule.ID())
+
+				if node, err := c.gh.GetNode(c.gremlin.V().Has("Name", "TestNode")); err != common.ErrNotFound {
+					return fmt.Errorf("Node %+v found with name TestNode", node)
+				}
+
+				return nil
+			},
+		},
+	}
+
+	RunTest(t, test)
+}
+
+func TestNodeRuleUpdate(t *testing.T) {
+	nodeRule := &types.NodeRule{
+		Action:   "update",
+		Query:    "G.V().Has('Name', 'br-umd', 'Type', 'ovsbridge')",
+		Metadata: graph.Metadata{"testKey": "testValue"},
+	}
+
+	test := &Test{
+		setupCmds: []Cmd{
 			{"ovs-vsctl add-br br-umd", true},
 		},
 
 		setupFunction: func(c *TestContext) error {
-			return c.client.Create("usermetadata", umd)
+			return c.client.Create("noderule", nodeRule)
 		},
 
 		tearDownFunction: func(c *TestContext) error {
-			c.client.Delete("usermetadata", umd.ID())
+			c.client.Delete("noderule", nodeRule.ID())
 			return nil
 		},
 
-		tearDownCmds: []helper.Cmd{
+		tearDownCmds: []Cmd{
 			{"ovs-vsctl del-br br-umd", true},
 		},
 
@@ -696,18 +742,78 @@ func TestUserMetadata(t *testing.T) {
 
 		checks: []CheckFunction{
 			func(c *CheckContext) error {
-				if _, err := c.gh.GetNode(c.gremlin.V().Has("UserMetadata.testKey", "testValue")); err != nil {
-					return fmt.Errorf("Failed to find a node with UserMetadata.testKey metadata")
+				if _, err := c.gh.GetNode(c.gremlin.V().Has("testKey", "testValue")); err != nil {
+					return fmt.Errorf("Failed to find a node with testKey metadata")
 				}
 
 				return nil
 			},
 
 			func(c *CheckContext) error {
-				c.client.Delete("usermetadata", umd.ID())
+				c.client.Delete("noderule", nodeRule.ID())
 
-				if node, err := c.gh.GetNode(c.gremlin.V().Has("UserMetadata.testKey", "testValue")); err != common.ErrNotFound {
-					return fmt.Errorf("Node %+v was found with metadata UserMetadata.testKey", node)
+				if node, err := c.gh.GetNode(c.gremlin.V().Has("testKey", "testValue")); err != common.ErrNotFound {
+					return fmt.Errorf("Node %+v was found with metadata testKey", node)
+				}
+
+				return nil
+			},
+		},
+	}
+
+	RunTest(t, test)
+}
+
+func TestEdgeRuleCreate(t *testing.T) {
+	edgeRule := &types.EdgeRule{
+		Src:      "G.V().Has('Name', 'br-srcnode', 'Type', 'ovsbridge')",
+		Dst:      "G.V().Has('Name', 'br-dstnode', 'Type', 'ovsbridge')",
+		Metadata: graph.Metadata{"RelationType": "layer2"},
+	}
+
+	test := &Test{
+		setupCmds: []Cmd{
+			{"ovs-vsctl add-br br-srcnode", true},
+			{"ovs-vsctl add-br br-dstnode", true},
+		},
+
+		setupFunction: func(c *TestContext) error {
+			return c.client.Create("edgerule", edgeRule)
+		},
+
+		tearDownFunction: func(c *TestContext) error {
+			c.client.Delete("edgerule", edgeRule.ID())
+			return nil
+		},
+
+		tearDownCmds: []Cmd{
+			{"ovs-vsctl del-br br-srcnode", true},
+			{"ovs-vsctl del-br br-dstnode", true},
+		},
+
+		mode: Replay,
+
+		checks: []CheckFunction{
+			func(c *CheckContext) error {
+				query := c.gremlin.V().Has("Name", "br-srcnode", "Type", "ovsbridge")
+				query = query.BothE().Has("RelationType", "layer2")
+				query = query.BothV().Has("Name", "br-dstnode", "Type", "ovsbridge")
+				if _, err := c.gh.GetNode(query); err != nil {
+					return errors.New("Failed to find a layer2 link")
+				}
+
+				return nil
+			},
+
+			func(c *CheckContext) error {
+				query := c.gremlin.V().Has("Name", "br-srcnode", "Type", "ovsbridge")
+				query = query.BothE().Has("RelationType", "layer2")
+				query = query.BothV().Has("Name", "br-dstnode", "Type", "ovsbridge")
+
+				c.client.Delete("edgerule", edgeRule.ID())
+
+				if _, err := c.gh.GetNode(query); err != common.ErrNotFound {
+					return errors.New("Found a layer2 link")
 				}
 
 				return nil
@@ -740,7 +846,7 @@ func TestAgentMetadata(t *testing.T) {
 //TestRouteTable tests route table update
 func TestRouteTable(t *testing.T) {
 	test := &Test{
-		setupCmds: []helper.Cmd{
+		setupCmds: []Cmd{
 			{"ovs-vsctl add-br br-rt", true},
 			{"ip netns add rt-vm1", true},
 			{"ip link add rt-vm1-eth0 type veth peer name rt-eth-src netns rt-vm1", true},
@@ -756,7 +862,7 @@ func TestRouteTable(t *testing.T) {
 			{"ovs-vsctl add-port br-rt rt-vm2-eth0", true},
 		},
 
-		tearDownCmds: []helper.Cmd{
+		tearDownCmds: []Cmd{
 			{"ovs-vsctl del-br br-rt", true},
 			{"ip link del rt-vm1-eth0", true},
 			{"ip netns del rt-vm1", true},
@@ -775,12 +881,15 @@ func TestRouteTable(t *testing.T) {
 					return fmt.Errorf("Failed to find a node with IP 124.65.91.42/24")
 				}
 
-				routingTable := node.Metadata()["RoutingTable"].([]interface{})
-				noOfRoutingTable := len(routingTable)
+				routingTables, ok := node.Metadata["RoutingTables"].(*netlink.RoutingTables)
+				if !ok {
+					return fmt.Errorf("Wrong metadata type for RoutingTables: %+v", node.Metadata["RoutingTables"])
+				}
+				noOfRoutingTable := len(*routingTables)
 
-				helper.ExecCmds(t,
-					helper.Cmd{Cmd: "ip netns exec rt-vm1 ip route add 124.65.92.0/24 via 124.65.91.42 table 2", Check: true},
-					helper.Cmd{Cmd: "sleep 5", Check: false},
+				execCmds(t,
+					Cmd{Cmd: "ip netns exec rt-vm1 ip route add 124.65.92.0/24 via 124.65.91.42 table 2", Check: true},
+					Cmd{Cmd: "sleep 5", Check: false},
 				)
 
 				node, err = c.gh.GetNode(prefix.V().Has("IPV4", "124.65.91.42/24"))
@@ -788,12 +897,15 @@ func TestRouteTable(t *testing.T) {
 					return fmt.Errorf("Failed to find a node with IP 124.65.91.42/24")
 				}
 
-				routingTable = node.Metadata()["RoutingTable"].([]interface{})
-				newNoOfRoutingTable := len(routingTable)
+				routingTables, ok = node.Metadata["RoutingTables"].(*netlink.RoutingTables)
+				if !ok {
+					return fmt.Errorf("Wrong metadata type for RoutingTables: %+v", node.Metadata["RoutingTables"])
+				}
+				newNoOfRoutingTable := len(*routingTables)
 
-				helper.ExecCmds(t,
-					helper.Cmd{Cmd: "ip netns exec rt-vm1 ip route del 124.65.92.0/24 via 124.65.91.42 table 2", Check: true},
-					helper.Cmd{Cmd: "sleep 5", Check: false},
+				execCmds(t,
+					Cmd{Cmd: "ip netns exec rt-vm1 ip route del 124.65.92.0/24 via 124.65.91.42 table 2", Check: true},
+					Cmd{Cmd: "sleep 5", Check: false},
 				)
 				if newNoOfRoutingTable <= noOfRoutingTable {
 					return fmt.Errorf("Failed to add Route")
@@ -808,7 +920,7 @@ func TestRouteTable(t *testing.T) {
 //TestRouteTableHistory tests route table update available in history
 func TestRouteTableHistory(t *testing.T) {
 	test := &Test{
-		setupCmds: []helper.Cmd{
+		setupCmds: []Cmd{
 			{"ovs-vsctl add-br br-rth", true},
 			{"ip netns add rth-vm1", true},
 			{"ip link add rth-vm1-eth0 type veth peer name rth-eth-src netns rth-vm1", true},
@@ -826,7 +938,7 @@ func TestRouteTableHistory(t *testing.T) {
 			{"ip netns exec rth-vm1 ip route add 124.65.75.0/24 via 124.65.75.42 table 2", true},
 		},
 
-		tearDownCmds: []helper.Cmd{
+		tearDownCmds: []Cmd{
 			{"ovs-vsctl del-br br-rth", true},
 			{"ip link del rth-vm1-eth0", true},
 			{"ip netns del rth-vm1", true},
@@ -843,11 +955,15 @@ func TestRouteTableHistory(t *testing.T) {
 				if err != nil {
 					return fmt.Errorf("Failed to find a node with IP 124.65.75.42/24")
 				}
-				routingTable := node.Metadata()["RoutingTable"].([]interface{})
+
+				routingTables, ok := node.Metadata["RoutingTables"].(*netlink.RoutingTables)
+				if !ok {
+					return fmt.Errorf("Wrong metadata type for RoutingTables: %+v", reflect.TypeOf(node.Metadata["RoutingTables"]))
+				}
+
 				foundNewTable := false
-				for _, obj := range routingTable {
-					rt := obj.(map[string]interface{})
-					if rt["Id"].(int64) == 2 {
+				for _, rt := range *routingTables {
+					if rt.ID == 2 {
 						foundNewTable = true
 						break
 					}
@@ -856,6 +972,26 @@ func TestRouteTableHistory(t *testing.T) {
 					return fmt.Errorf("Failed to get added Route from history")
 				}
 				return nil
+			},
+		},
+	}
+	RunTest(t, test)
+}
+
+func TestInterfaceFeatures(t *testing.T) {
+	test := &Test{
+		setupCmds: []Cmd{
+			{"brctl addbr br-features", true},
+		},
+
+		tearDownCmds: []Cmd{
+			{"brctl delbr br-features", true},
+		},
+
+		checks: []CheckFunction{
+			func(c *CheckContext) error {
+				_, err := c.gh.GetNode(c.gremlin.V().Has("Name", "br-features", "Features.highdma", true))
+				return err
 			},
 		},
 	}

@@ -27,6 +27,7 @@
      - rpm-build
      - rpmlint
      - libvirt
+     - libvirt-devel
      - libvirt-client
      - vagrant-libvirt
      - ansible
@@ -53,6 +54,7 @@
      - ffmpeg
      - npm
      - gifsicle
+     - podman
 
 - service:
     name: "{{ item }}"

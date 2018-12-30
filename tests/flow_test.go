@@ -23,13 +23,15 @@
 package tests
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
+	"net"
 	"net/http"
 	"os"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -40,12 +42,12 @@ import (
 	"github.com/skydive-project/skydive/common"
 	"github.com/skydive-project/skydive/flow"
 	g "github.com/skydive-project/skydive/gremlin"
-	"github.com/skydive-project/skydive/tests/helper"
+	"github.com/skydive-project/skydive/logging"
 )
 
 func TestSFlowProbeNode(t *testing.T) {
 	test := &Test{
-		setupCmds: []helper.Cmd{
+		setupCmds: []Cmd{
 			{"ovs-vsctl add-br br-spn", true},
 			{"ovs-vsctl add-port br-spn spn-intf1 -- set interface spn-intf1 type=internal", true},
 			{"ip address add 169.254.33.33/24 dev spn-intf1", true},
@@ -58,7 +60,7 @@ func TestSFlowProbeNode(t *testing.T) {
 			count: 5,
 		}},
 
-		tearDownCmds: []helper.Cmd{
+		tearDownCmds: []Cmd{
 			{"ovs-vsctl del-br br-spn", true},
 		},
 
@@ -74,13 +76,13 @@ func TestSFlowProbeNode(t *testing.T) {
 				return err
 			}
 
-			flows, err := c.gh.GetFlows(c.gremlin.Flows().Has("NodeTID", node.Metadata()["TID"], "LayersPath", "Ethernet/IPv4/ICMPv4"))
+			flows, err := c.gh.GetFlows(c.gremlin.Flows().Has("NodeTID", node.Metadata["TID"], "LayersPath", "Ethernet/IPv4/ICMPv4"))
 			if err != nil {
 				return err
 			}
 
 			if len(flows) != 1 {
-				return fmt.Errorf("Unable to find only one flow with the expected NodeTID %s", node.Metadata()["TID"])
+				return fmt.Errorf("Unable to find only one flow with the expected NodeTID %s", node.Metadata["TID"])
 			}
 
 			return nil
@@ -92,7 +94,7 @@ func TestSFlowProbeNode(t *testing.T) {
 
 func TestSFlowNodeTIDOvsInternalNetNS(t *testing.T) {
 	test := &Test{
-		setupCmds: []helper.Cmd{
+		setupCmds: []Cmd{
 			{"ovs-vsctl add-br br-sntoin", true},
 			{"ovs-vsctl add-port br-sntoin sntoin-intf1 -- set interface sntoin-intf1 type=internal", true},
 			{"ip netns add sntoin-vm1", true},
@@ -107,7 +109,7 @@ func TestSFlowNodeTIDOvsInternalNetNS(t *testing.T) {
 			count: 5,
 		}},
 
-		tearDownCmds: []helper.Cmd{
+		tearDownCmds: []Cmd{
 			{"ip netns del sntoin-vm1", true},
 			{"ovs-vsctl del-br br-sntoin", true},
 		},
@@ -124,7 +126,7 @@ func TestSFlowNodeTIDOvsInternalNetNS(t *testing.T) {
 				return err
 			}
 
-			flows, err := c.gh.GetFlows(c.gremlin.Flows("NodeTID", node.Metadata()["TID"], "LayersPath", "Ethernet/IPv4/ICMPv4"))
+			flows, err := c.gh.GetFlows(c.gremlin.Flows("NodeTID", node.Metadata["TID"], "LayersPath", "Ethernet/IPv4/ICMPv4"))
 			if err != nil {
 				return err
 			}
@@ -142,7 +144,7 @@ func TestSFlowNodeTIDOvsInternalNetNS(t *testing.T) {
 
 func TestSFlowTwoNodeTID(t *testing.T) {
 	test := &Test{
-		setupCmds: []helper.Cmd{
+		setupCmds: []Cmd{
 			{"ovs-vsctl add-br br-stnt1", true},
 			{"ovs-vsctl add-port br-stnt1 stnt-intf1 -- set interface stnt-intf1 type=internal", true},
 			{"ip netns add stnt-vm1", true},
@@ -175,7 +177,7 @@ func TestSFlowTwoNodeTID(t *testing.T) {
 			count: 5,
 		}},
 
-		tearDownCmds: []helper.Cmd{
+		tearDownCmds: []Cmd{
 			{"ip netns del stnt-vm1", true},
 			{"ip netns del stnt-vm2", true},
 			{"ovs-vsctl del-br br-stnt1", true},
@@ -240,7 +242,7 @@ func TestSFlowTwoNodeTID(t *testing.T) {
 
 func TestBPF(t *testing.T) {
 	test := &Test{
-		setupCmds: []helper.Cmd{
+		setupCmds: []Cmd{
 			{"brctl addbr br-bpf", true},
 			{"ip link set br-bpf up", true},
 			{"ip netns add bpf-vm1", true},
@@ -264,7 +266,7 @@ func TestBPF(t *testing.T) {
 			count: 5,
 		}},
 
-		tearDownCmds: []helper.Cmd{
+		tearDownCmds: []Cmd{
 			{"ip link set br-bpf down", true},
 			{"brctl delbr br-bpf", true},
 			{"ip link del bpf-vm1-eth0", true},
@@ -298,7 +300,7 @@ func TestBPF(t *testing.T) {
 
 func TestPCAPProbe(t *testing.T) {
 	test := &Test{
-		setupCmds: []helper.Cmd{
+		setupCmds: []Cmd{
 			{"brctl addbr br-pp", true},
 			{"ip link set br-pp up", true},
 			{"ip netns add pp-vm1", true},
@@ -322,7 +324,7 @@ func TestPCAPProbe(t *testing.T) {
 			count: 5,
 		}},
 
-		tearDownCmds: []helper.Cmd{
+		tearDownCmds: []Cmd{
 			{"ip link set br-pp down", true},
 			{"brctl delbr br-pp", true},
 			{"ip link del pp-vm1-eth0", true},
@@ -343,7 +345,7 @@ func TestPCAPProbe(t *testing.T) {
 				return err
 			}
 
-			flows, err := c.gh.GetFlows(c.gremlin.Flows().Has("NodeTID", node.Metadata()["TID"]))
+			flows, err := c.gh.GetFlows(c.gremlin.Flows().Has("NodeTID", node.Metadata["TID"]))
 			if err != nil {
 				return err
 			}
@@ -361,7 +363,7 @@ func TestPCAPProbe(t *testing.T) {
 
 func TestSFlowSrcDstPath(t *testing.T) {
 	test := &Test{
-		setupCmds: []helper.Cmd{
+		setupCmds: []Cmd{
 			{"ovs-vsctl add-br br-ssdp", true},
 
 			{"ovs-vsctl add-port br-ssdp ssdp-intf1 -- set interface ssdp-intf1 type=internal", true},
@@ -378,12 +380,12 @@ func TestSFlowSrcDstPath(t *testing.T) {
 		},
 
 		injections: []TestInjection{{
-			from:  g.G.V().Has("Name", "ssdp-intf1", "Type", "internal"),
-			to:    g.G.V().Has("Name", "ssdp-intf2", "Type", "internal"),
+			from:  g.G.V().Has("Name", "ssdp-vm1", "Type", "netns").Out().Has("Name", "ssdp-intf1"),
+			to:    g.G.V().Has("Name", "ssdp-vm2", "Type", "netns").Out().Has("Name", "ssdp-intf2"),
 			count: 5,
 		}},
 
-		tearDownCmds: []helper.Cmd{
+		tearDownCmds: []Cmd{
 			{"ip netns del ssdp-vm1", true},
 			{"ip netns del ssdp-vm2", true},
 			{"ovs-vsctl del-br br-ssdp", true},
@@ -437,7 +439,7 @@ func TestSFlowSrcDstPath(t *testing.T) {
 
 func TestFlowGremlin(t *testing.T) {
 	test := &Test{
-		setupCmds: []helper.Cmd{
+		setupCmds: []Cmd{
 			{"ovs-vsctl add-br br-fg", true},
 			{"ovs-vsctl add-port br-fg fg-intf1 -- set interface fg-intf1 type=internal", true},
 			{"ip address add 169.254.33.33/24 dev fg-intf1", true},
@@ -448,7 +450,7 @@ func TestFlowGremlin(t *testing.T) {
 			from: g.G.V().Has("Name", "fg-intf1", "Type", "internal"), toIP: "169.254.33.34", count: 5,
 		}},
 
-		tearDownCmds: []helper.Cmd{
+		tearDownCmds: []Cmd{
 			{"ovs-vsctl del-br br-fg", true},
 		},
 
@@ -464,10 +466,9 @@ func TestFlowGremlin(t *testing.T) {
 				return err
 			}
 
-			var count int64
-			c.gh.QueryObject(c.gremlin.V().Has("Name", "br-fg", "Type", "ovsbridge").Count(), &count)
-			if count != 1 {
-				return fmt.Errorf("Should return 1, got: %d", count)
+			count, err := c.gh.GetInt64(c.gremlin.V().Has("Name", "br-fg", "Type", "ovsbridge").Count())
+			if err != nil || count != 1 {
+				return fmt.Errorf("Should return 1, got: %d - %s", count, err)
 			}
 
 			tid, _ := node.GetFieldString("TID")
@@ -501,8 +502,8 @@ func TestFlowGremlin(t *testing.T) {
 				return fmt.Errorf("Should return one source node, got %d", len(nodes))
 			}
 
-			c.gh.QueryObject(flowsGremlin.Count(), &count)
-			if int(count) != len(flows) {
+			count, err = c.gh.GetInt64(flowsGremlin.Count())
+			if err != nil || int(count) != len(flows) {
 				return fmt.Errorf("Gremlin count doesn't correspond to the number of flows, got: %v, expected: %v", len(flows), count)
 			}
 
@@ -515,7 +516,7 @@ func TestFlowGremlin(t *testing.T) {
 
 func TestFlowMetrics(t *testing.T) {
 	test := &Test{
-		setupCmds: []helper.Cmd{
+		setupCmds: []Cmd{
 			{"ovs-vsctl add-br br-fm", true},
 
 			{"ovs-vsctl add-port br-fm fm-intf1 -- set interface fm-intf1 type=internal", true},
@@ -538,7 +539,7 @@ func TestFlowMetrics(t *testing.T) {
 			payload: string(make([]byte, 1024)),
 		}},
 
-		tearDownCmds: []helper.Cmd{
+		tearDownCmds: []Cmd{
 			{"ip netns del fm-vm1", true},
 			{"ip netns del fm-vm2", true},
 			{"ovs-vsctl del-br br-fm", true},
@@ -594,63 +595,74 @@ func TestFlowMetrics(t *testing.T) {
 				return fmt.Errorf("Layers bytes error, got: %v", icmp)
 			}
 
-			pingLen := icmp[0].Metric.ABBytes
-			metric, err := c.gh.GetFlowMetric(gremlin.Has("Metric.ABBytes", g.Gt(pingLen-1)))
-			if err != nil || metric.ABBytes < pingLen {
-				return fmt.Errorf("Number of bytes is wrong, got: %v (error: %+v)", metric, err)
+			getFirstFlowMetric := func(query interface{}) (*flow.FlowMetric, error) {
+				flows, err := c.gh.GetFlows(query)
+				if err != nil {
+					return nil, err
+				}
+				if len(flows) == 0 {
+					return nil, common.ErrNotFound
+				}
+				return flows[0].Metric, nil
 			}
 
-			metric, err = c.gh.GetFlowMetric(gremlin.Has("Metric.ABBytes", g.Gt(pingLen)))
+			pingLen := icmp[0].Metric.ABBytes
+			metric, err := getFirstFlowMetric(gremlin.Has("Metric.ABBytes", g.Gt(pingLen-1)))
+			if err != nil || metric.ABBytes < pingLen {
+				return fmt.Errorf("Number of bytes is wrong, got: %v (error: %s)", metric, err)
+			}
+
+			metric, err = getFirstFlowMetric(gremlin.Has("Metric.ABBytes", g.Gt(pingLen)))
 			if err != common.ErrNotFound {
 				return fmt.Errorf("Wrong number of flow, should have none, got : %v", metric)
 			}
 
-			metric, err = c.gh.GetFlowMetric(gremlin.Has("Metric.ABBytes", g.Gte(pingLen)))
-			if err != nil || metric == nil || metric.ABBytes < pingLen {
+			metric, err = getFirstFlowMetric(gremlin.Has("Metric.ABBytes", g.Gte(pingLen)))
+			if err != nil || metric.ABBytes < pingLen {
 				return fmt.Errorf("Number of bytes is wrong, got: %v", metric)
 			}
 
-			metric, err = c.gh.GetFlowMetric(gremlin.Has("Metric.ABBytes", g.Gte(pingLen+1)))
+			metric, err = getFirstFlowMetric(gremlin.Has("Metric.ABBytes", g.Gte(pingLen+1)))
 			if err != common.ErrNotFound {
 				return fmt.Errorf("Wrong number of flow, should have none, got : %v", metric)
 			}
 
-			metric, err = c.gh.GetFlowMetric(gremlin.Has("Metric.ABBytes", g.Lt(pingLen+1)))
+			metric, err = getFirstFlowMetric(gremlin.Has("Metric.ABBytes", g.Lt(pingLen+1)))
 			if err != nil || metric.ABBytes > pingLen {
 				return fmt.Errorf("Number of bytes is wrong, got: %v", metric)
 			}
 
-			metric, err = c.gh.GetFlowMetric(gremlin.Has("Metric.ABBytes", g.Lt(pingLen)))
+			metric, err = getFirstFlowMetric(gremlin.Has("Metric.ABBytes", g.Lt(pingLen)))
 			if err != common.ErrNotFound {
 				return fmt.Errorf("Wrong number of flow, should have none, got : %v", metric)
 			}
 
-			metric, err = c.gh.GetFlowMetric(gremlin.Has("Metric.ABBytes", g.Lte(pingLen)))
+			metric, err = getFirstFlowMetric(gremlin.Has("Metric.ABBytes", g.Lte(pingLen)))
 			if err != nil || metric == nil || metric.ABBytes > pingLen {
 				return fmt.Errorf("Number of bytes is wrong, got: %v", metric)
 			}
 
-			metric, err = c.gh.GetFlowMetric(gremlin.Has("Metric.ABBytes", g.Lte(pingLen-1)))
+			metric, err = getFirstFlowMetric(gremlin.Has("Metric.ABBytes", g.Lte(pingLen-1)))
 			if err != common.ErrNotFound {
 				return fmt.Errorf("Wrong number of flow, should have none, got : %v", metric)
 			}
 
-			metric, err = c.gh.GetFlowMetric(gremlin.Has("Metric.ABBytes", g.Inside(pingLen-1, pingLen+1)))
+			metric, err = getFirstFlowMetric(gremlin.Has("Metric.ABBytes", g.Inside(pingLen-1, pingLen+1)))
 			if err != nil || metric == nil || metric.ABBytes <= pingLen-1 || metric.ABBytes >= pingLen+1 {
 				return fmt.Errorf("Number of bytes is wrong, got: %v", metric)
 			}
 
-			metric, err = c.gh.GetFlowMetric(gremlin.Has("Metric.ABBytes", g.Inside(pingLen, pingLen+1)))
+			metric, err = getFirstFlowMetric(gremlin.Has("Metric.ABBytes", g.Inside(pingLen, pingLen+1)))
 			if err != common.ErrNotFound {
 				return fmt.Errorf("Wrong number of flow, should have none, got : %v", metric)
 			}
 
-			metric, err = c.gh.GetFlowMetric(gremlin.Has("Metric.ABBytes", g.Between(pingLen, pingLen+1)))
+			metric, err = getFirstFlowMetric(gremlin.Has("Metric.ABBytes", g.Between(pingLen, pingLen+1)))
 			if err != nil || metric == nil || metric.ABBytes <= pingLen-1 || metric.ABBytes >= pingLen+1 {
 				return fmt.Errorf("Number of bytes is wrong, got: %v", metric)
 			}
 
-			metric, err = c.gh.GetFlowMetric(gremlin.Has("Metric.ABBytes", g.Between(pingLen, pingLen)))
+			metric, err = getFirstFlowMetric(gremlin.Has("Metric.ABBytes", g.Between(pingLen, pingLen)))
 			if err != common.ErrNotFound {
 				return fmt.Errorf("Wrong number of flow, should have none, got : %v", metric)
 			}
@@ -664,7 +676,7 @@ func TestFlowMetrics(t *testing.T) {
 
 func TestFlowMetricsStep(t *testing.T) {
 	test := &Test{
-		setupCmds: []helper.Cmd{
+		setupCmds: []Cmd{
 			{"ovs-vsctl add-br br-fms", true},
 
 			{"ovs-vsctl add-port br-fms fms-intf1 -- set interface fms-intf1 type=internal", true},
@@ -687,7 +699,7 @@ func TestFlowMetricsStep(t *testing.T) {
 			payload: string(make([]byte, 1024)),
 		}},
 
-		tearDownCmds: []helper.Cmd{
+		tearDownCmds: []Cmd{
 			{"ip netns del fms-vm1", true},
 			{"ip netns del fms-vm2", true},
 			{"ovs-vsctl del-br br-fms", true},
@@ -705,19 +717,18 @@ func TestFlowMetricsStep(t *testing.T) {
 		}, func(c *CheckContext) error {
 			gremlin := g.G.Context(c.startTime, c.startTime.Unix()-c.setupTime.Unix()+5).V().Has("Name", "br-fms", "Type", "ovsbridge").Flows()
 
-			m, err := c.gh.GetMetric(gremlin.Has("LayersPath", "Ethernet/IPv4/ICMPv4").Dedup().Metrics().Sum())
+			metric, err := c.gh.GetFlowMetric(gremlin.Has("LayersPath", "Ethernet/IPv4/ICMPv4").Dedup().Metrics().Sum())
 			if err != nil {
 				flows, _ := c.gh.GetFlows(gremlin.Has("LayersPath", "Ethernet/IPv4/ICMPv4").Dedup().Metrics())
-				return fmt.Errorf("Could not find metrics (%+v) for flows %s", m, helper.FlowsToString(flows))
+				return fmt.Errorf("Could not find metrics (%+v) for flows %s", metric, flowsToString(flows))
 			}
-			metric := m.(*flow.FlowMetric)
 
 			if metric.ABPackets != 15 || metric.BAPackets != 15 || metric.ABBytes < 15360 || metric.BABytes < 15360 {
 				flows, _ := c.gh.GetFlows(gremlin)
-				return fmt.Errorf("Wrong metric returned, got : %+v for flows %+v, request: %s", metric, helper.FlowsToString(flows), gremlin.Has("LayersPath", "Ethernet/IPv4/ICMPv4").Dedup().Metrics().Sum())
+				return fmt.Errorf("Wrong metric returned, got : %+v for flows %+v, request: %s", metric, flowsToString(flows), gremlin.Has("LayersPath", "Ethernet/IPv4/ICMPv4").Dedup().Metrics().Sum())
 			}
 
-			checkMetricsOrder := func(metrics map[string][]common.Metric) error {
+			checkMetricsOrder := func(metrics map[string][]*flow.FlowMetric) error {
 				// check it's sorted
 				var start int64
 				for _, metricsOfID := range metrics {
@@ -736,7 +747,7 @@ func TestFlowMetricsStep(t *testing.T) {
 				return nil
 			}
 
-			metrics, err := c.gh.GetMetrics(gremlin.Has("LayersPath", "Ethernet/IPv4/ICMPv4").Dedup().Metrics())
+			metrics, err := c.gh.GetFlowMetrics(gremlin.Has("LayersPath", "Ethernet/IPv4/ICMPv4").Dedup().Metrics())
 			if err != nil || len(metrics) == 0 {
 				return fmt.Errorf("Could not find metrics (%+v)", metrics)
 			}
@@ -749,7 +760,7 @@ func TestFlowMetricsStep(t *testing.T) {
 				return err
 			}
 
-			metrics, err = c.gh.GetMetrics(gremlin.Has("LayersPath", "Ethernet/IPv4/ICMPv4").Dedup().Metrics().Aggregates(10))
+			metrics, err = c.gh.GetFlowMetrics(gremlin.Has("LayersPath", "Ethernet/IPv4/ICMPv4").Dedup().Metrics().Aggregates(10))
 			if err != nil || len(metrics) == 0 {
 				return fmt.Errorf("Could not find metrics (%+v)", metrics)
 			}
@@ -763,7 +774,7 @@ func TestFlowMetricsStep(t *testing.T) {
 
 func TestFlowHops(t *testing.T) {
 	test := &Test{
-		setupCmds: []helper.Cmd{
+		setupCmds: []Cmd{
 			{"ovs-vsctl add-br br-fh", true},
 
 			{"ovs-vsctl add-port br-fh fh-intf1 -- set interface fh-intf1 type=internal", true},
@@ -786,7 +797,7 @@ func TestFlowHops(t *testing.T) {
 			payload: string(make([]byte, 1024-8)),
 		}},
 
-		tearDownCmds: []helper.Cmd{
+		tearDownCmds: []Cmd{
 			{"ip netns del fh-vm1", true},
 			{"ip netns del fh-vm2", true},
 			{"ovs-vsctl del-br br-fh", true},
@@ -833,7 +844,7 @@ func TestFlowHops(t *testing.T) {
 			}
 
 			found := false
-			m := nodes[0].Metadata()
+			m := nodes[0].Metadata
 			for _, n := range tnodes {
 				if n.MatchMetadata(m) == true {
 					found = true
@@ -856,8 +867,23 @@ func TestIPv6FlowHopsIPv6(t *testing.T) {
 		t.Skipf("Platform doesn't support IPv6")
 	}
 
+	filterIPv6AddrAnd := func(flows []*flow.Flow, A, B string) (r []*flow.Flow) {
+		for _, f := range flows {
+			if f.Network == nil || (f.Network.Protocol != flow.FlowProtocol_IPV6) {
+				continue
+			}
+			if strings.HasPrefix(f.Network.A, A) && strings.HasPrefix(f.Network.B, B) {
+				r = append(r, f)
+			}
+			if strings.HasPrefix(f.Network.A, B) && strings.HasPrefix(f.Network.B, A) {
+				r = append(r, f)
+			}
+		}
+		return r
+	}
+
 	test := &Test{
-		setupCmds: []helper.Cmd{
+		setupCmds: []Cmd{
 			{"ovs-vsctl add-br br-ipv6fh", true},
 
 			{"ovs-vsctl add-port br-ipv6fh ipv6fh-intf1 -- set interface ipv6fh-intf1 type=internal", true},
@@ -880,7 +906,7 @@ func TestIPv6FlowHopsIPv6(t *testing.T) {
 			ipv6:  true,
 		}},
 
-		tearDownCmds: []helper.Cmd{
+		tearDownCmds: []Cmd{
 			{"ip netns del ipv6fh-vm1", true},
 			{"ip netns del ipv6fh-vm2", true},
 			{"ovs-vsctl del-br br-ipv6fh", true},
@@ -894,14 +920,14 @@ func TestIPv6FlowHopsIPv6(t *testing.T) {
 		// we should wait 11 sec to have the first update and the MetricRange filled
 		checks: []CheckFunction{func(c *CheckContext) error {
 			prefix := c.gremlin.V().Has("Name", "br-ipv6fh", "Type", "ovsbridge")
-			gremlin := prefix.Flows().Has("LayersPath", "Ethernet/IPv6/ICMPv6", "ICMP.Type", "ECHO")
+			gremlin := prefix.Flows().Has("LayersPath", "Ethernet/IPv6/ICMPv6/ICMPv6Echo", "ICMP.Type", "ECHO")
 			// filterIPv6AddrAnd() as we received multicast/broadcast from fresh registered interfaces announcement
 			allFlows, err := c.gh.GetFlows(gremlin)
 			if err != nil {
 				return err
 			}
 
-			flows := helper.FilterIPv6AddrAnd(allFlows, "fd49:37c8:5229::1", "fd49:37c8:5229::2")
+			flows := filterIPv6AddrAnd(allFlows, "fd49:37c8:5229::1", "fd49:37c8:5229::2")
 			if len(flows) != 1 {
 				return errors.New("We should receive only one ICMPv6 flow")
 			}
@@ -917,7 +943,7 @@ func TestIPv6FlowHopsIPv6(t *testing.T) {
 			}
 
 			/* Dedup() here for same reason than above ^^^ */
-			gremlin = prefix.Flows().Has("LayersPath", "Ethernet/IPv6/ICMPv6").Hops().Dedup()
+			gremlin = prefix.Flows().Has("LayersPath", "Ethernet/IPv6/ICMPv6/ICMPv6Echo").Hops().Dedup()
 			nodes, err := c.gh.GetNodes(gremlin)
 			if err != nil {
 				return err
@@ -928,7 +954,7 @@ func TestIPv6FlowHopsIPv6(t *testing.T) {
 			}
 
 			found := false
-			m := nodes[0].Metadata()
+			m := nodes[0].Metadata
 			for _, n := range tnodes {
 				if n.MatchMetadata(m) == true {
 					found = true
@@ -952,7 +978,7 @@ func TestICMP(t *testing.T) {
 	}
 
 	test := &Test{
-		setupCmds: []helper.Cmd{
+		setupCmds: []Cmd{
 			{"ovs-vsctl add-br br-icmp", true},
 
 			{"ovs-vsctl add-port br-icmp icmp-intf1 -- set interface icmp-intf1 type=internal", true},
@@ -987,7 +1013,7 @@ func TestICMP(t *testing.T) {
 			},
 		},
 
-		tearDownCmds: []helper.Cmd{
+		tearDownCmds: []Cmd{
 			{"ip netns del icmp-vm1", true},
 			{"ip netns del icmp-vm2", true},
 			{"ovs-vsctl del-br br-icmp", true},
@@ -1013,7 +1039,7 @@ func TestICMP(t *testing.T) {
 			}
 
 			if len(icmpFlows) != 1 {
-				return fmt.Errorf("We should receive one ICMPv4 flow with ID 123, got %s", helper.FlowsToString(icmpFlows))
+				return fmt.Errorf("We should receive one ICMPv4 flow with ID 123, got %s", flowsToString(icmpFlows))
 			}
 
 			gremlin = prefix.Flows().Has("TrackingID", ipv4TrackingID)
@@ -1023,17 +1049,17 @@ func TestICMP(t *testing.T) {
 			}
 
 			if len(icmpFlows) != 1 {
-				return fmt.Errorf("We should receive one ICMPv4 flow with TrackingID %s, got %s", ipv4TrackingID, helper.FlowsToString(icmpFlows))
+				return fmt.Errorf("We should receive one ICMPv4 flow with TrackingID %s, got %s", ipv4TrackingID, flowsToString(icmpFlows))
 			}
 
-			gremlin = prefix.Flows().Has("LayersPath", "Ethernet/IPv6/ICMPv6", "ICMP.ID", 456)
+			gremlin = prefix.Flows().Has("LayersPath", "Ethernet/IPv6/ICMPv6/ICMPv6Echo", "ICMP.ID", 456)
 			icmpFlows, err = c.gh.GetFlows(gremlin)
 			if err != nil {
 				return err
 			}
 
 			if len(icmpFlows) != 1 {
-				return fmt.Errorf("We should receive one ICMPv6 flow with ID 456, got %s", helper.FlowsToString(icmpFlows))
+				return fmt.Errorf("We should receive one ICMPv6 flow with ID 456, got %s", flowsToString(icmpFlows))
 			}
 
 			gremlin = prefix.Flows().Has("TrackingID", ipv6TrackingID)
@@ -1043,7 +1069,7 @@ func TestICMP(t *testing.T) {
 			}
 
 			if len(icmpFlows) != 1 {
-				return fmt.Errorf("We should receive one ICMPv6 flow with TrackingID %s, got %s", ipv6TrackingID, helper.FlowsToString(icmpFlows))
+				return fmt.Errorf("We should receive one ICMPv6 flow with TrackingID %s, got %s", ipv6TrackingID, flowsToString(icmpFlows))
 			}
 
 			gremlin = prefix.Flows().Has("LayersPath", "Ethernet/IPv4/ICMPv4", "ICMP.Type", "ECHO")
@@ -1053,7 +1079,7 @@ func TestICMP(t *testing.T) {
 			}
 
 			if len(icmpFlows) != 3 {
-				return fmt.Errorf("We should receive 3 ICMP flows, got %s", helper.FlowsToString(icmpFlows))
+				return fmt.Errorf("We should receive 3 ICMP flows, got %s", flowsToString(icmpFlows))
 			}
 
 			return nil
@@ -1115,7 +1141,7 @@ func testFlowTunnel(t *testing.T, bridge string, tunnelType string, ipv6 bool, I
 	}
 
 	test := &Test{
-		setupCmds: []helper.Cmd{
+		setupCmds: []Cmd{
 			{"sudo ovs-vsctl add-br " + bridge, true},
 
 			{"sudo ip netns add tunnel-vm1", true},
@@ -1149,7 +1175,7 @@ func testFlowTunnel(t *testing.T, bridge string, tunnelType string, ipv6 bool, I
 			{fmt.Sprintf("sudo ip netns exec tunnel-vm2 ip r add %s dev tunnel", addrRange), true},
 		},
 
-		tearDownCmds: []helper.Cmd{
+		tearDownCmds: []Cmd{
 			{"ip link del tunnel-vm1-eth0", true},
 			{"ip link del tunnel-vm2-eth0", true},
 			{"ip netns del tunnel-vm1", true},
@@ -1194,7 +1220,7 @@ func testFlowTunnel(t *testing.T, bridge string, tunnelType string, ipv6 bool, I
 			}
 
 			if len(flowsInnerTunnel) != 1 {
-				return fmt.Errorf("We should have only one %s flow in the tunnel %v", icmpVersion, helper.FlowsToString(flowsInnerTunnel))
+				return fmt.Errorf("We should have only one %s flow in the tunnel %v", icmpVersion, flowsToString(flowsInnerTunnel))
 			}
 
 			trackingID := flowsInnerTunnel[0].TrackingID
@@ -1204,7 +1230,7 @@ func testFlowTunnel(t *testing.T, bridge string, tunnelType string, ipv6 bool, I
 			}
 
 			if len(flowsBridge) == 0 {
-				return fmt.Errorf("TrackingID not found in %s tunnel: leaving the interface(%v) == seen in the tunnel(%v)", tunnelType, helper.FlowsToString(flowsInnerTunnel), helper.FlowsToString(flowsBridge))
+				return fmt.Errorf("TrackingID not found in %s tunnel: leaving the interface(%v) == seen in the tunnel(%v)", tunnelType, flowsToString(flowsInnerTunnel), flowsToString(flowsBridge))
 			}
 
 			return nil
@@ -1217,8 +1243,46 @@ func testFlowTunnel(t *testing.T, bridge string, tunnelType string, ipv6 bool, I
 func TestReplayCapture(t *testing.T) {
 	var capture *types.Capture
 
+	sendPCAPFile := func(filename string, socket string) error {
+		file, err := os.Open(filename)
+		if err != nil {
+			return fmt.Errorf("Failed to open file %s: %s", filename, err.Error())
+		}
+
+		stats, err := file.Stat()
+		if err != nil {
+			return fmt.Errorf("Failed to get informations for %s: %s", filename, err.Error())
+		}
+
+		tcpAddr, err := net.ResolveTCPAddr("tcp", socket)
+		if err != nil {
+			return fmt.Errorf("Failed to parse address %s: %s", tcpAddr.String(), err.Error())
+		}
+
+		conn, err := net.DialTCP("tcp", nil, tcpAddr)
+		if err != nil {
+			return fmt.Errorf("Failed to connect to TCP socket %s: %s", tcpAddr.String(), err.Error())
+		}
+
+		unixFile, err := conn.File()
+		if err != nil {
+			return fmt.Errorf("Failed to get file description from socket %s: %s", socket, err.Error())
+		}
+		defer unixFile.Close()
+
+		dst := unixFile.Fd()
+		src := file.Fd()
+
+		_, err = syscall.Sendfile(int(dst), int(src), nil, int(stats.Size()))
+		if err != nil {
+			logging.GetLogger().Fatalf("Failed to send file %s to socket %s: %s", filename, socket, err.Error())
+		}
+
+		return nil
+	}
+
 	test := &Test{
-		setupCmds: []helper.Cmd{
+		setupCmds: []Cmd{
 			{"ovs-vsctl add-br br-rc", true},
 		},
 
@@ -1234,10 +1298,10 @@ func TestReplayCapture(t *testing.T) {
 		},
 
 		setupFunction: func(c *TestContext) error {
-			return helper.SendPCAPFile("pcaptraces/eth-ip4-arp-dns-req-http-google.pcap", capture.PCAPSocket)
+			return sendPCAPFile("pcaptraces/eth-ip4-arp-dns-req-http-google.pcap", capture.PCAPSocket)
 		},
 
-		tearDownCmds: []helper.Cmd{
+		tearDownCmds: []Cmd{
 			{"ovs-vsctl del-br br-rc", true},
 		},
 
@@ -1254,7 +1318,7 @@ func TestReplayCapture(t *testing.T) {
 				return err
 			}
 
-			gremlin = c.gremlin.Flows().Has("NodeTID", node.Metadata()["TID"])
+			gremlin = c.gremlin.Flows().Has("NodeTID", node.Metadata["TID"])
 			flows, err := c.gh.GetFlows(gremlin)
 			if err != nil {
 				return err
@@ -1317,7 +1381,7 @@ func TestPcapInject(t *testing.T) {
 
 func TestFlowVLANSegmentation(t *testing.T) {
 	test := &Test{
-		setupCmds: []helper.Cmd{
+		setupCmds: []Cmd{
 			{"sudo ovs-vsctl add-br br-vlan", true},
 
 			{"sudo ip netns add vlan-vm1", true},
@@ -1348,7 +1412,7 @@ func TestFlowVLANSegmentation(t *testing.T) {
 			count: 5,
 		}},
 
-		tearDownCmds: []helper.Cmd{
+		tearDownCmds: []Cmd{
 			{"sudo ip link del vlan-vm1-eth0", true},
 			{"sudo ip link del vlan-vm2-eth0", true},
 			{"sudo ip netns del vlan-vm1", true},
@@ -1368,11 +1432,11 @@ func TestFlowVLANSegmentation(t *testing.T) {
 			}
 
 			if len(outFlows) != 1 {
-				return fmt.Errorf("We should have only one ICMPv4 flow %v", helper.FlowsToString(outFlows))
+				return fmt.Errorf("We should have only one ICMPv4 flow %v", flowsToString(outFlows))
 			}
 
 			if outFlows[0].GetLink().GetID() != 8 {
-				return fmt.Errorf("Should have a Vlan ID equal to 8 got: %v", helper.FlowsToString(outFlows))
+				return fmt.Errorf("Should have a Vlan ID equal to 8 got: %v", flowsToString(outFlows))
 			}
 
 			inFlows, err := c.gh.GetFlows(c.gremlin.V().Has("Name", "vlan").Flows().Has("LayersPath", "Ethernet/IPv4/ICMPv4"))
@@ -1381,11 +1445,11 @@ func TestFlowVLANSegmentation(t *testing.T) {
 			}
 
 			if len(inFlows) != 1 {
-				return fmt.Errorf("We should have only one ICMPv4 flow %v", helper.FlowsToString(inFlows))
+				return fmt.Errorf("We should have only one ICMPv4 flow %v", flowsToString(inFlows))
 			}
 
 			if inFlows[0].L3TrackingID != outFlows[0].L3TrackingID {
-				return fmt.Errorf("Both flows should have the same L3TrackingID: :%s vs %v", helper.FlowsToString(outFlows), helper.FlowsToString(inFlows))
+				return fmt.Errorf("Both flows should have the same L3TrackingID: :%s vs %v", flowsToString(outFlows), flowsToString(inFlows))
 			}
 
 			return nil
@@ -1397,7 +1461,7 @@ func TestFlowVLANSegmentation(t *testing.T) {
 
 func TestSort(t *testing.T) {
 	test := &Test{
-		setupCmds: []helper.Cmd{
+		setupCmds: []Cmd{
 			{"ovs-vsctl add-br br-int", true},
 
 			{"ip netns add dst-vm", true},
@@ -1423,7 +1487,7 @@ func TestSort(t *testing.T) {
 			{"ovs-vsctl add-port br-int src-vm2-eth0", true},
 		},
 
-		tearDownCmds: []helper.Cmd{
+		tearDownCmds: []Cmd{
 			{"ovs-vsctl del-br br-int", true},
 			{"ip link del dst-vm-eth0", true},
 			{"ip link del src-vm1-eth0", true},
@@ -1484,7 +1548,7 @@ func TestSort(t *testing.T) {
 
 func TestFlowSumStep(t *testing.T) {
 	test := &Test{
-		setupCmds: []helper.Cmd{
+		setupCmds: []Cmd{
 			{"ovs-vsctl add-br br-sum", true},
 
 			{"ip netns add vm1", true},
@@ -1529,7 +1593,7 @@ func TestFlowSumStep(t *testing.T) {
 			{from: g.G.V().Has("Name", "intf1"), to: g.G.V().Has("Name", "intf3"), count: 3},
 		},
 
-		tearDownCmds: []helper.Cmd{
+		tearDownCmds: []Cmd{
 			{"ovs-vsctl del-br br-sum", true},
 			{"ip link del vm1-eth0", true},
 			{"ip link del vm2-eth0", true},
@@ -1548,11 +1612,10 @@ func TestFlowSumStep(t *testing.T) {
 		checks: []CheckFunction{func(c *CheckContext) error {
 			gremlin := c.gremlin.V().Has("Name", "br-sum", "Type", "ovsbridge").Flows().Has("LayersPath", "Ethernet/IPv4/ICMPv4").Dedup().Sum("Metric.ABPackets")
 
-			var s interface{}
-			if err := c.gh.QueryObject(gremlin, &s); err != nil {
+			sum, err := c.gh.GetInt64(gremlin)
+			if err != nil {
 				return fmt.Errorf("Error while retriving SUM: %v", err)
 			}
-			sum, _ := s.(json.Number).Int64()
 			if sum != 10 {
 				return fmt.Errorf("Got wrong sum value, Expected 10 got %v", sum)
 			}
@@ -1565,7 +1628,7 @@ func TestFlowSumStep(t *testing.T) {
 
 func TestFlowCaptureNodeStep(t *testing.T) {
 	test := &Test{
-		setupCmds: []helper.Cmd{
+		setupCmds: []Cmd{
 			{"ovs-vsctl add-br br-fcn", true},
 
 			{"ip netns add cns-vm1", true},
@@ -1584,7 +1647,7 @@ func TestFlowCaptureNodeStep(t *testing.T) {
 			{"ovs-vsctl add-port br-fcn cns-vm2-eth0", true},
 		},
 
-		tearDownCmds: []helper.Cmd{
+		tearDownCmds: []Cmd{
 			{"ovs-vsctl del-br br-fcn", true},
 			{"ip link del cns-vm1-eth0", true},
 			{"ip link del cns-vm2-eth0", true},
@@ -1612,7 +1675,7 @@ func TestFlowCaptureNodeStep(t *testing.T) {
 				return fmt.Errorf("Expected one node, got %+v", nodes)
 			}
 
-			nodeName := nodes[0].Metadata()["Name"].(string)
+			nodeName := nodes[0].Metadata["Name"].(string)
 			if nodeName != "br-fcn" {
 				return fmt.Errorf("we should get br-fcn node, got %s", nodeName)
 			}
@@ -1625,7 +1688,7 @@ func TestFlowCaptureNodeStep(t *testing.T) {
 
 func TestFlowsWithShortestPath(t *testing.T) {
 	test := &Test{
-		setupCmds: []helper.Cmd{
+		setupCmds: []Cmd{
 			{"ovs-vsctl add-br br-spt", true},
 
 			{"ip netns add src-vm", true},
@@ -1644,7 +1707,7 @@ func TestFlowsWithShortestPath(t *testing.T) {
 			{"ovs-vsctl add-port br-spt dst-vm-eth0", true},
 		},
 
-		tearDownCmds: []helper.Cmd{
+		tearDownCmds: []Cmd{
 			{"ovs-vsctl del-br br-spt", true},
 			{"ip link del dst-vm-eth0", true},
 			{"ip link del src-vm-eth0", true},
@@ -1726,7 +1789,7 @@ func getRawPackets(gh *gclient.GremlinQueryHelper, query g.QueryString) ([]gopac
 			}
 			break
 		}
-		packet := gopacket.NewPacket(data, handle.LinkType(), gopacket.NoCopy)
+		packet := gopacket.NewPacket(data, handle.LinkType(), gopacket.DecodeOptions{NoCopy: true})
 		packets = append(packets, packet)
 	}
 
@@ -1735,7 +1798,7 @@ func getRawPackets(gh *gclient.GremlinQueryHelper, query g.QueryString) ([]gopac
 
 func TestRawPackets(t *testing.T) {
 	test := &Test{
-		setupCmds: []helper.Cmd{
+		setupCmds: []Cmd{
 			{"brctl addbr br-rp", true},
 			{"ip link set br-rp up", true},
 			{"ip netns add rp-vm1", true},
@@ -1753,7 +1816,7 @@ func TestRawPackets(t *testing.T) {
 			{"brctl addif br-rp rp-vm2-eth0", true},
 		},
 
-		tearDownCmds: []helper.Cmd{
+		tearDownCmds: []Cmd{
 			{"ip link set br-rp down", true},
 			{"brctl delbr br-rp", true},
 			{"ip link del rp-vm1-eth0", true},
@@ -1780,7 +1843,7 @@ func TestRawPackets(t *testing.T) {
 				return err
 			}
 
-			query := g.G.At("-1s").Flows().Has("NodeTID", node.Metadata()["TID"], "LayersPath", "Ethernet/IPv4/ICMPv4")
+			query := g.G.At("-1s").Flows().Has("NodeTID", node.Metadata["TID"], "LayersPath", "Ethernet/IPv4/ICMPv4")
 
 			flows, err := c.gh.GetFlows(query)
 			if err != nil {
@@ -1830,7 +1893,7 @@ func TestRawPackets(t *testing.T) {
 
 func TestFlowsWithIpv4Range(t *testing.T) {
 	test := &Test{
-		setupCmds: []helper.Cmd{
+		setupCmds: []Cmd{
 			{"ovs-vsctl add-br br-ipr", true},
 
 			{"ip netns add src-ipr", true},
@@ -1849,7 +1912,7 @@ func TestFlowsWithIpv4Range(t *testing.T) {
 			{"ovs-vsctl add-port br-ipr dst-ipr-eth0", true},
 		},
 
-		tearDownCmds: []helper.Cmd{
+		tearDownCmds: []Cmd{
 			{"ovs-vsctl del-br br-ipr", true},
 			{"ip link del dst-ipr-eth0", true},
 			{"ip link del src-ipr-eth0", true},
@@ -1886,14 +1949,14 @@ func TestFlowsWithIpv4Range(t *testing.T) {
 
 func TestOvsMirror(t *testing.T) {
 	test := &Test{
-		setupCmds: []helper.Cmd{
+		setupCmds: []Cmd{
 			{"ovs-vsctl add-br br-omir", true},
 			{"ovs-vsctl add-port br-omir omir-if1 -- set interface omir-if1 type=internal", true},
 			{"ip address add 169.254.93.33/24 dev omir-if1", true},
 			{"ip link set omir-if1 up", true},
 		},
 
-		tearDownCmds: []helper.Cmd{
+		tearDownCmds: []Cmd{
 			{"ovs-vsctl del-br br-omir", true},
 		},
 
@@ -1934,7 +1997,7 @@ func TestOvsMirror(t *testing.T) {
 				return fmt.Errorf("Unable to find expected Mirror information of %v on mirror node %v != %v", orig, node, aa)
 			}
 
-			flows, err := c.gh.GetFlows(c.gremlin.Flows("NodeTID", node.Metadata()["TID"], "LayersPath", "Ethernet/IPv4/ICMPv4"))
+			flows, err := c.gh.GetFlows(c.gremlin.Flows("NodeTID", node.Metadata["TID"], "LayersPath", "Ethernet/IPv4/ICMPv4"))
 			if err != nil {
 				return err
 			}
@@ -1952,7 +2015,7 @@ func TestOvsMirror(t *testing.T) {
 
 func TestSFlowCapture(t *testing.T) {
 	test := &Test{
-		setupCmds: []helper.Cmd{
+		setupCmds: []Cmd{
 			{"ovs-vsctl add-br br-sfct", true},
 
 			{"ovs-vsctl add-port br-sfct sfct-intf1 -- set interface sfct-intf1 type=internal", true},
@@ -1976,7 +2039,7 @@ func TestSFlowCapture(t *testing.T) {
 			count: 1,
 		}},
 
-		tearDownCmds: []helper.Cmd{
+		tearDownCmds: []Cmd{
 			{"ip netns del sfct-vm1", true},
 			{"ip netns del sfct-vm2", true},
 			{"ovs-vsctl del-br br-sfct", true},
@@ -1994,7 +2057,7 @@ func TestSFlowCapture(t *testing.T) {
 				return err
 			}
 
-			flows, err := c.gh.GetFlows(c.gremlin.Flows("NodeTID", node.Metadata()["TID"]).Has("Network.A", "169.254.29.11"))
+			flows, err := c.gh.GetFlows(c.gremlin.Flows("NodeTID", node.Metadata["TID"]).Has("Network.A", "169.254.29.11"))
 			if err != nil {
 				return err
 			}

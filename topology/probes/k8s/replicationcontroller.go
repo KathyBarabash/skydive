@@ -25,82 +25,26 @@ package k8s
 import (
 	"fmt"
 
-	"github.com/skydive-project/skydive/logging"
-	"github.com/skydive-project/skydive/probe"
-	"github.com/skydive-project/skydive/topology/graph"
+	"github.com/skydive-project/skydive/graffiti/graph"
 
 	"k8s.io/api/core/v1"
-	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/kubernetes"
 )
 
-type replicationControllerProbe struct {
-	defaultKubeCacheEventHandler
-	*kubeCache
-	graph *graph.Graph
+type replicationControllerHandler struct {
 }
 
-func dumpReplicationController(rc *v1.ReplicationController) string {
+func (h *replicationControllerHandler) Dump(obj interface{}) string {
+	rc := obj.(*v1.ReplicationController)
 	return fmt.Sprintf("replicationController{Name: %s}", rc.GetName())
 }
 
-func (p *replicationControllerProbe) newMetadata(rc *v1.ReplicationController) graph.Metadata {
-	return newMetadata("replicationcontroller", rc.Namespace, rc.GetName(), rc)
+func (h *replicationControllerHandler) Map(obj interface{}) (graph.Identifier, graph.Metadata) {
+	rc := obj.(*v1.ReplicationController)
+	m := NewMetadataFields(&rc.ObjectMeta)
+	return graph.Identifier(rc.GetUID()), NewMetadata(Manager, "replicationcontroller", m, rc, rc.Name)
 }
 
-func replicationControllerUID(rc *v1.ReplicationController) graph.Identifier {
-	return graph.Identifier(rc.GetUID())
-}
-
-func (p *replicationControllerProbe) OnAdd(obj interface{}) {
-	if rc, ok := obj.(*v1.ReplicationController); ok {
-		p.graph.Lock()
-		defer p.graph.Unlock()
-
-		newNode(p.graph, replicationControllerUID(rc), p.newMetadata(rc))
-		logging.GetLogger().Debugf("Added %s", dumpReplicationController(rc))
-	}
-}
-
-func (p *replicationControllerProbe) OnUpdate(oldObj, newObj interface{}) {
-	if rc, ok := newObj.(*v1.ReplicationController); ok {
-		p.graph.Lock()
-		defer p.graph.Unlock()
-
-		if node := p.graph.GetNode(replicationControllerUID(rc)); node != nil {
-			addMetadata(p.graph, node, rc)
-			logging.GetLogger().Debugf("Updated %s", dumpReplicationController(rc))
-		}
-	}
-}
-
-func (p *replicationControllerProbe) OnDelete(obj interface{}) {
-	if rc, ok := obj.(*v1.ReplicationController); ok {
-		p.graph.Lock()
-		defer p.graph.Unlock()
-
-		if node := p.graph.GetNode(replicationControllerUID(rc)); node != nil {
-			p.graph.DelNode(node)
-			logging.GetLogger().Debugf("Deleted %s", dumpReplicationController(rc))
-		}
-	}
-}
-
-func (p *replicationControllerProbe) Start() {
-	p.kubeCache.Start()
-}
-
-func (p *replicationControllerProbe) Stop() {
-	p.kubeCache.Stop()
-}
-
-func newReplicationControllerKubeCache(handler cache.ResourceEventHandler) *kubeCache {
-	return newKubeCache(getClientset().CoreV1().RESTClient(), &v1.ReplicationController{}, "replicationcontrollers", handler)
-}
-
-func newReplicationControllerProbe(g *graph.Graph) probe.Probe {
-	p := &replicationControllerProbe{
-		graph: g,
-	}
-	p.kubeCache = newReplicationControllerKubeCache(p)
-	return p
+func newReplicationControllerProbe(client interface{}, g *graph.Graph) Subprobe {
+	return NewResourceCache(client.(*kubernetes.Clientset).CoreV1().RESTClient(), &v1.ReplicationController{}, "replicationcontrollers", g, &replicationControllerHandler{})
 }

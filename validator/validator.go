@@ -32,8 +32,8 @@ import (
 	valid "gopkg.in/validator.v2"
 
 	"github.com/skydive-project/skydive/flow"
+	"github.com/skydive-project/skydive/graffiti/graph/traversal"
 	ge "github.com/skydive-project/skydive/gremlin/traversal"
-	"github.com/skydive-project/skydive/topology/graph/traversal"
 )
 
 // Validator interface used to validate value type in Gremlin expression
@@ -64,7 +64,6 @@ var (
 	RawPacketLimitNotValid = func(min, max uint32) error {
 		return valid.TextErr{Err: fmt.Errorf("A valid raw packet limit size is > %d && <= %d", min, max)}
 	}
-
 	//LayerKeyModeNotValid validator
 	LayerKeyModeNotValid = func() error {
 		return valid.TextErr{Err: errors.New("Not a valid layer key mode")}
@@ -95,12 +94,21 @@ func isGremlinExpr(v interface{}, param string) error {
 	tr.AddTraversalExtension(ge.NewSocketsTraversalExtension())
 	tr.AddTraversalExtension(ge.NewRawPacketsTraversalExtension())
 	tr.AddTraversalExtension(ge.NewDescendantsTraversalExtension())
+	tr.AddTraversalExtension(ge.NewNextHopTraversalExtension())
 
 	if _, err := tr.Parse(strings.NewReader(query)); err != nil {
 		return GremlinNotValid(err)
 	}
 
 	return nil
+}
+
+func isGremlinOrEmpty(v interface{}, param string) error {
+	query, ok := v.(string)
+	if ok && strings.TrimSpace(query) == "" {
+		return nil
+	}
+	return isGremlinExpr(v, param)
 }
 
 func isBPFFilter(v interface{}, param string) error {
@@ -176,6 +184,7 @@ func Validate(value interface{}) error {
 func init() {
 	skydiveValidator.SetValidationFunc("isIP", isIP)
 	skydiveValidator.SetValidationFunc("isGremlinExpr", isGremlinExpr)
+	skydiveValidator.SetValidationFunc("isGremlinOrEmpty", isGremlinOrEmpty)
 	skydiveValidator.SetValidationFunc("isBPFFilter", isBPFFilter)
 	skydiveValidator.SetValidationFunc("isValidCaptureHeaderSize", isValidCaptureHeaderSize)
 	skydiveValidator.SetValidationFunc("isValidRawPacketLimit", isValidRawPacketLimit)

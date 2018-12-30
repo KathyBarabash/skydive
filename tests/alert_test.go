@@ -23,25 +23,26 @@
 package tests
 
 import (
-	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/ioutil"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/hydrogen18/stoppableListener"
 	"github.com/skydive-project/skydive/alert"
 	"github.com/skydive-project/skydive/api/types"
-	"github.com/skydive-project/skydive/common"
 	"github.com/skydive-project/skydive/config"
-	"github.com/skydive-project/skydive/tests/helper"
-	"github.com/skydive-project/skydive/topology/graph"
+	"github.com/skydive-project/skydive/graffiti/graph"
+	ws "github.com/skydive-project/skydive/websocket"
 )
 
 var alertLock sync.Mutex
@@ -50,29 +51,104 @@ func checkMessage(t *testing.T, b []byte, al *types.Alert, nsName string) (bool,
 	alertLock.Lock()
 	defer alertLock.Unlock()
 
-	var alertMsg alert.Message
-	if err := common.JSONDecode(bytes.NewReader(b), &alertMsg); err == nil {
+	var alertMsg struct {
+		alert.Message
+		ReasonData []*graph.Node
+	}
+	if err := json.Unmarshal(b, &alertMsg); err == nil {
 		if alertMsg.UUID == al.UUID {
-			var nodes []*graph.Node
-			switch arr := alertMsg.ReasonData.(type) {
-			case []interface{}:
-				for _, obj := range arr {
-					n := new(graph.Node)
-					if err := n.Decode(obj); err != nil {
-						return false, err
-					}
-					nodes = append(nodes, n)
-				}
-			}
-
-			if len(nodes) > 0 {
-				if name, _ := nodes[0].GetFieldString("Name"); name == nsName {
+			if len(alertMsg.ReasonData) > 0 {
+				if name, _ := alertMsg.ReasonData[0].GetFieldString("Name"); name == nsName {
 					return true, nil
 				}
 			}
 		}
 	}
 	return false, nil
+}
+
+func wsClose(ws *websocket.Conn) error {
+	if err := ws.WriteControl(websocket.CloseMessage, nil, time.Now().Add(3*time.Second)); err != nil {
+		return err
+	}
+	return ws.Close()
+}
+
+func decodeStructMessageJSON(b []byte) *ws.StructMessage {
+	mJSON := ws.StructMessageJSON{}
+	if err := json.Unmarshal(b, &mJSON); err != nil {
+		return nil
+	}
+	msg := &ws.StructMessage{
+		Protocol:  ws.JSONProtocol,
+		Namespace: mJSON.Namespace,
+		Type:      mJSON.Type,
+		UUID:      mJSON.UUID,
+		Status:    mJSON.Status,
+		JSONObj:   mJSON.Obj,
+	}
+	return msg
+}
+
+func newClient(endpoint string) (*websocket.Conn, error) {
+	conn, err := net.Dial("tcp", endpoint)
+	if err != nil {
+		return nil, err
+	}
+
+	scheme := "ws"
+	if config.IsTLSEnabled() == true {
+		scheme = "wss"
+	}
+	endpoint = fmt.Sprintf("%s://%s/ws/subscriber", scheme, endpoint)
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return nil, err
+	}
+
+	wsConn, _, err := websocket.NewClient(conn, u, http.Header{"Origin": {endpoint}}, 1024, 1024)
+	if err != nil {
+		return nil, err
+	}
+
+	return wsConn, nil
+}
+
+func connect(endpoint string, timeout int, onReady func(*websocket.Conn)) (*websocket.Conn, error) {
+	var ws *websocket.Conn
+	var err error
+
+	t := 0
+	for {
+		if t > timeout {
+			return nil, errors.New("Connection to Agent : timeout reached")
+		}
+
+		ws, err = newClient(endpoint)
+		if err == nil {
+			break
+		}
+		time.Sleep(1 * time.Second)
+		t++
+	}
+
+	ready := false
+	h := func(message string) error {
+		err := ws.WriteControl(websocket.PongMessage, []byte(message), time.Now().Add(time.Second))
+		if err != nil {
+			return err
+		}
+		if !ready {
+			ready = true
+			if onReady != nil {
+				onReady(ws)
+			}
+		}
+		return nil
+	}
+	ws.SetPingHandler(h)
+
+	return ws, nil
 }
 
 func TestAlertWebhook(t *testing.T) {
@@ -120,7 +196,7 @@ func TestAlertWebhook(t *testing.T) {
 	}
 
 	test := &Test{
-		setupCmds: []helper.Cmd{
+		setupCmds: []Cmd{
 			{"ip netns add alert-ns-webhook", true},
 		},
 
@@ -142,7 +218,7 @@ func TestAlertWebhook(t *testing.T) {
 			return nil
 		},
 
-		tearDownCmds: []helper.Cmd{
+		tearDownCmds: []Cmd{
 			{"ip netns del alert-ns-webhook", true},
 		},
 
@@ -168,7 +244,7 @@ func TestAlertWebhook(t *testing.T) {
 }
 
 func TestAlertScript(t *testing.T) {
-	if helper.AgentTestsOnly {
+	if agentTestsOnly {
 		t.Skip("this test works only when agent and analyzers are on the same host")
 	}
 
@@ -204,7 +280,7 @@ func TestAlertScript(t *testing.T) {
 	defer os.Remove(tmpfile.Name())
 
 	test := &Test{
-		setupCmds: []helper.Cmd{
+		setupCmds: []Cmd{
 			{"ip netns add alert-ns-script", true},
 		},
 
@@ -220,7 +296,7 @@ func TestAlertScript(t *testing.T) {
 			return nil
 		},
 
-		tearDownCmds: []helper.Cmd{
+		tearDownCmds: []Cmd{
 			{"ip netns del alert-ns-script", true},
 		},
 
@@ -260,12 +336,12 @@ func TestAlertWithTimer(t *testing.T) {
 	test := &Test{
 		retries: 1,
 
-		setupCmds: []helper.Cmd{
+		setupCmds: []Cmd{
 			{"ip netns add alert-ns-timer", true},
 		},
 
 		setupFunction: func(c *TestContext) error {
-			ws, err = helper.WSConnect(config.GetStringSlice("analyzers")[0], 5, nil)
+			ws, err = connect(config.GetStringSlice("analyzers")[0], 5, nil)
 			if err != nil {
 				return err
 			}
@@ -281,12 +357,12 @@ func TestAlertWithTimer(t *testing.T) {
 			return nil
 		},
 
-		tearDownCmds: []helper.Cmd{
+		tearDownCmds: []Cmd{
 			{"ip netns del alert-ns-timer", true},
 		},
 
 		tearDownFunction: func(c *TestContext) error {
-			helper.WSClose(ws)
+			wsClose(ws)
 			return c.client.Delete("alert", al.ID())
 		},
 
@@ -297,7 +373,7 @@ func TestAlertWithTimer(t *testing.T) {
 					return err
 				}
 
-				msg := helper.DecodeWSStructMessageJSON(m)
+				msg := decodeStructMessageJSON(m)
 				if msg == nil {
 					t.Fatal("Failed to unmarshal message")
 				}
@@ -305,13 +381,13 @@ func TestAlertWithTimer(t *testing.T) {
 					continue
 				}
 
-				testPassed, err := checkMessage(t, []byte(*msg.JsonObj), al, "alert-ns-timer")
+				testPassed, err := checkMessage(t, []byte(*msg.JSONObj), al, "alert-ns-timer")
 				if err != nil {
 					return err
 				}
 
 				if !testPassed {
-					return fmt.Errorf("Wrong alert message: %+v (error: %+v)", string(*msg.JsonObj), err)
+					return fmt.Errorf("Wrong alert message: %+v (error: %+v)", string(*msg.JSONObj), err)
 				}
 
 				break
@@ -332,12 +408,12 @@ func TestMultipleTriggering(t *testing.T) {
 	)
 
 	test := &Test{
-		setupCmds: []helper.Cmd{
+		setupCmds: []Cmd{
 			{"ip netns add alert-lo-down", true},
 		},
 
 		setupFunction: func(c *TestContext) error {
-			ws, err = helper.WSConnect(config.GetStringSlice("analyzers")[0], 5, nil)
+			ws, err = connect(config.GetStringSlice("analyzers")[0], 5, nil)
 			if err != nil {
 				return err
 			}
@@ -353,12 +429,12 @@ func TestMultipleTriggering(t *testing.T) {
 			return nil
 		},
 
-		tearDownCmds: []helper.Cmd{
+		tearDownCmds: []Cmd{
 			{"ip netns del alert-lo-down", true},
 		},
 
 		tearDownFunction: func(c *TestContext) error {
-			helper.WSClose(ws)
+			wsClose(ws)
 			return c.client.Delete("alert", al.ID())
 		},
 
@@ -366,10 +442,10 @@ func TestMultipleTriggering(t *testing.T) {
 
 		checks: []CheckFunction{func(c *CheckContext) error {
 			alertNumber := 0
-			cmd := []helper.Cmd{
+			cmd := []Cmd{
 				{"ip netns exec alert-lo-down ip l set lo up", true},
 			}
-			downLo := []helper.Cmd{
+			downLo := []Cmd{
 				{"ip netns exec alert-lo-down ip l set lo down", true},
 			}
 			for alertNumber < 2 {
@@ -378,7 +454,7 @@ func TestMultipleTriggering(t *testing.T) {
 					return err
 				}
 
-				msg := helper.DecodeWSStructMessageJSON(m)
+				msg := decodeStructMessageJSON(m)
 				if msg == nil {
 					t.Fatal("Failed to unmarshal message")
 				}
@@ -388,7 +464,7 @@ func TestMultipleTriggering(t *testing.T) {
 				}
 
 				var alertMsg alert.Message
-				if err := msg.DecodeObj(&alertMsg); err != nil {
+				if err := msg.UnmarshalObj(&alertMsg); err != nil {
 					t.Fatalf("Failed to unmarshal alert : %s", err.Error())
 				}
 
@@ -397,7 +473,7 @@ func TestMultipleTriggering(t *testing.T) {
 					continue
 				}
 				alertNumber++
-				helper.ExecCmds(t, cmd...)
+				execCmds(t, cmd...)
 				cmd = downLo
 			}
 

@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -41,33 +42,30 @@ import (
 	"github.com/skydive-project/skydive/common"
 	"github.com/skydive-project/skydive/config"
 	"github.com/skydive-project/skydive/filters"
+	"github.com/skydive-project/skydive/graffiti/graph"
 	"github.com/skydive-project/skydive/logging"
 	"github.com/skydive-project/skydive/topology"
-	"github.com/skydive-project/skydive/topology/graph"
 )
 
 const (
 	maxEpollEvents = 32
 )
 
+var flagNames = []string{
+	"UP",
+	"BROADCAST",
+	"LOOPBACK",
+	"POINTTOPOINT",
+	"MULTICAST",
+}
+
 type pendingLink struct {
 	ID       graph.Identifier
 	Metadata graph.Metadata
 }
 
-// easyjson:json
-type Neighbor struct {
-	Flags   []string `json:"Flags,omitempty"`
-	MAC     string
-	IP      string   `json:"IP,omitempty"`
-	State   []string `json:"State,omitempty"`
-	Vlan    int64    `json:"Vlan,omitempty"`
-	VNI     int64    `json:"VNI,omitempty"`
-	IfIndex int64
-}
-
-// NetNsNetLinkProbe describes a topology probe based on netlink in a network namespace
-type NetNsNetLinkProbe struct {
+// NetNsProbe describes a topology probe based on netlink in a network namespace
+type NetNsProbe struct {
 	common.RWMutex
 	Graph                *graph.Graph
 	Root                 *graph.Node
@@ -83,41 +81,18 @@ type NetNsNetLinkProbe struct {
 	quit                 chan bool
 }
 
-// NetLinkProbe describes a list NetLink NameSpace probe to enhance the graph
-type NetLinkProbe struct {
+// Probe describes a list NetLink NameSpace probe to enhance the graph
+type Probe struct {
 	common.RWMutex
-	Graph   *graph.Graph
-	epollFd int
-	probes  map[int32]*NetNsNetLinkProbe
-	state   int64
-	wg      sync.WaitGroup
+	Graph    *graph.Graph
+	hostNode *graph.Node
+	epollFd  int
+	probes   map[int32]*NetNsProbe
+	state    int64
+	wg       sync.WaitGroup
 }
 
-// RoutingTable describes a list of Routes
-// easyjson:json
-type RoutingTable struct {
-	ID     int64   `json:"Id"`
-	Src    net.IP  `json:"Src,omitempty"`
-	Routes []Route `json:"Routes,omitempty"`
-}
-
-// Route describes a route
-// easyjson:json
-type Route struct {
-	Protocol int64     `json:"Protocol,omitempty"`
-	Prefix   string    `json:"Prefix,omitempty"`
-	Nexthops []NextHop `json:"Nexthops,omitempty"`
-}
-
-// NextHop describes a next hop
-// easyjson:json
-type NextHop struct {
-	Priority int64  `json:"Priority,omitempty"`
-	IP       net.IP `json:"Src,omitempty"`
-	IfIndex  int64  `json:"IfIndex,omitempty"`
-}
-
-func (u *NetNsNetLinkProbe) linkPendingChildren(intf *graph.Node, index int64) {
+func (u *NetNsProbe) linkPendingChildren(intf *graph.Node, index int64) {
 	// ignore ovs-system interface as it doesn't make any sense according to
 	// the following thread:
 	// http://openvswitch.org/pipermail/discuss/2013-October/011657.html
@@ -137,7 +112,7 @@ func (u *NetNsNetLinkProbe) linkPendingChildren(intf *graph.Node, index int64) {
 	}
 }
 
-func (u *NetNsNetLinkProbe) linkIntfToIndex(intf *graph.Node, index int64, m graph.Metadata) {
+func (u *NetNsProbe) linkIntfToIndex(intf *graph.Node, index int64, m graph.Metadata) {
 	// assuming we have only one master with this index
 	parent := u.Graph.LookupFirstChild(u.Root, graph.Metadata{"IfIndex": index})
 	if parent != nil {
@@ -157,7 +132,7 @@ func (u *NetNsNetLinkProbe) linkIntfToIndex(intf *graph.Node, index int64, m gra
 	}
 }
 
-func (u *NetNsNetLinkProbe) handleIntfIsChild(intf *graph.Node, link netlink.Link) {
+func (u *NetNsProbe) handleIntfIsChild(intf *graph.Node, link netlink.Link) {
 	// handle pending relationship
 	u.linkPendingChildren(intf, int64(link.Attrs().Index))
 
@@ -173,7 +148,7 @@ func (u *NetNsNetLinkProbe) handleIntfIsChild(intf *graph.Node, link netlink.Lin
 	}
 }
 
-func (u *NetNsNetLinkProbe) handleIntfIsVeth(intf *graph.Node, link netlink.Link) {
+func (u *NetNsProbe) handleIntfIsVeth(intf *graph.Node, link netlink.Link) {
 	if link.Type() != "veth" {
 		return
 	}
@@ -230,7 +205,7 @@ func (u *NetNsNetLinkProbe) handleIntfIsVeth(intf *graph.Node, link netlink.Link
 	}
 }
 
-func (u *NetNsNetLinkProbe) addGenericLinkToTopology(link netlink.Link, m graph.Metadata) *graph.Node {
+func (u *NetNsProbe) addGenericLinkToTopology(link netlink.Link, m graph.Metadata) *graph.Node {
 	index := int64(link.Attrs().Index)
 
 	var intf *graph.Node
@@ -239,7 +214,12 @@ func (u *NetNsNetLinkProbe) addGenericLinkToTopology(link netlink.Link, m graph.
 	})
 
 	if intf == nil {
-		intf = u.Graph.NewNode(graph.GenID(), m)
+		var err error
+		intf, err = u.Graph.NewNode(graph.GenID(), m)
+		if err != nil {
+			logging.GetLogger().Error(err)
+			return nil
+		}
 	}
 
 	if !topology.HaveOwnershipLink(u.Graph, u.Root, intf) {
@@ -249,7 +229,7 @@ func (u *NetNsNetLinkProbe) addGenericLinkToTopology(link netlink.Link, m graph.
 	return intf
 }
 
-func (u *NetNsNetLinkProbe) addBridgeLinkToTopology(link netlink.Link, m graph.Metadata) *graph.Node {
+func (u *NetNsProbe) addBridgeLinkToTopology(link netlink.Link, m graph.Metadata) *graph.Node {
 	index := int64(link.Attrs().Index)
 	intf := u.addGenericLinkToTopology(link, m)
 
@@ -258,7 +238,7 @@ func (u *NetNsNetLinkProbe) addBridgeLinkToTopology(link netlink.Link, m graph.M
 	return intf
 }
 
-func (u *NetNsNetLinkProbe) addOvsLinkToTopology(link netlink.Link, m graph.Metadata) *graph.Node {
+func (u *NetNsProbe) addOvsLinkToTopology(link netlink.Link, m graph.Metadata) *graph.Node {
 	name := link.Attrs().Name
 	attrs := link.Attrs()
 
@@ -271,7 +251,7 @@ func (u *NetNsNetLinkProbe) addOvsLinkToTopology(link netlink.Link, m graph.Meta
 		filters.NewNotNullFilter("UUID"),
 	)
 
-	intf := u.Graph.LookupFirstNode(graph.NewGraphElementFilter(filter))
+	intf := u.Graph.LookupFirstNode(graph.NewElementFilter(filter))
 	if intf != nil {
 		if !topology.HaveOwnershipLink(u.Graph, u.Root, intf) {
 			topology.AddOwnershipLink(u.Graph, u.Root, intf, nil)
@@ -281,7 +261,7 @@ func (u *NetNsNetLinkProbe) addOvsLinkToTopology(link netlink.Link, m graph.Meta
 	return intf
 }
 
-func (u *NetNsNetLinkProbe) getLinkIPs(link netlink.Link, family int) (ips []string) {
+func (u *NetNsProbe) getLinkIPs(link netlink.Link, family int) (ips []string) {
 	addrs, err := u.handle.AddrList(link, family)
 	if err != nil {
 		return
@@ -325,11 +305,13 @@ func getFlagsString(flags []string, state int) (a []string) {
 	return
 }
 
-func (u *NetNsNetLinkProbe) getNeighbors(index, family int) (neighbors []Neighbor) {
+func (u *NetNsProbe) getNeighbors(index, family int) *Neighbors {
+	var neighbors Neighbors
+
 	neighList, err := u.handle.NeighList(index, family)
 	if err == nil && len(neighList) > 0 {
 		for i, neigh := range neighList {
-			neighbors = append(neighbors, Neighbor{
+			neighbors = append(neighbors, &Neighbor{
 				Flags:   getFlagsString(neighFlags, neigh.Flags),
 				MAC:     neigh.HardwareAddr.String(),
 				State:   getFlagsString(neighStates, neigh.State),
@@ -338,11 +320,11 @@ func (u *NetNsNetLinkProbe) getNeighbors(index, family int) (neighbors []Neighbo
 				VNI:     int64(neigh.VNI),
 			})
 			if neigh.IP != nil {
-				neighbors[i].IP = neigh.IP.String()
+				neighbors[i].IP = neigh.IP
 			}
 		}
 	}
-	return
+	return &neighbors
 }
 
 func newInterfaceMetricsFromNetlink(link netlink.Link) *topology.InterfaceMetric {
@@ -378,7 +360,7 @@ func newInterfaceMetricsFromNetlink(link netlink.Link) *topology.InterfaceMetric
 	}
 }
 
-func (u *NetNsNetLinkProbe) addLinkToTopology(link netlink.Link) {
+func (u *NetNsProbe) addLinkToTopology(link netlink.Link) {
 	driver, _ := u.ethtool.DriverName(link.Attrs().Name)
 	if driver == "" && link.Type() == "bridge" {
 		driver = "bridge"
@@ -397,9 +379,15 @@ func (u *NetNsNetLinkProbe) addLinkToTopology(link netlink.Link) {
 		"Type":      linkType,
 		"EncapType": attrs.EncapType,
 		"IfIndex":   int64(attrs.Index),
-		"MAC":       attrs.HardwareAddr.String(),
-		"MTU":       int64(attrs.MTU),
 		"Driver":    driver,
+	}
+
+	if attrs.MTU != 0 {
+		metadata["MTU"] = int64(attrs.MTU)
+	}
+
+	if mac := attrs.HardwareAddr.String(); mac != "" {
+		metadata["MAC"] = mac
 	}
 
 	if attrs.MasterIndex != 0 {
@@ -416,18 +404,18 @@ func (u *NetNsNetLinkProbe) addLinkToTopology(link netlink.Link) {
 		}
 	}
 
-	if neighbors := u.getNeighbors(attrs.Index, syscall.AF_BRIDGE); len(neighbors) > 0 {
+	if neighbors := u.getNeighbors(attrs.Index, syscall.AF_BRIDGE); len(*neighbors) > 0 {
 		metadata["FDB"] = neighbors
 	}
 
 	neighbors := u.getNeighbors(attrs.Index, syscall.AF_INET)
-	neighbors = append(neighbors, u.getNeighbors(attrs.Index, syscall.AF_INET6)...)
-	if len(neighbors) > 0 {
+	*neighbors = append(*neighbors, *u.getNeighbors(attrs.Index, syscall.AF_INET6)...)
+	if len(*neighbors) > 0 {
 		metadata["Neighbors"] = neighbors
 	}
 
-	if rt := u.getRoutingTable(link, syscall.RTA_UNSPEC); rt != nil {
-		metadata["RoutingTable"] = rt
+	if rts := u.getRoutingTables(link, syscall.RTA_UNSPEC); rts != nil {
+		metadata["RoutingTables"] = &rts
 	}
 
 	if metric := newInterfaceMetricsFromNetlink(link); metric != nil {
@@ -437,7 +425,7 @@ func (u *NetNsNetLinkProbe) addLinkToTopology(link netlink.Link) {
 	if linkType == "veth" {
 		stats, err := u.ethtool.Stats(attrs.Name)
 		if err != nil && err != syscall.ENODEV {
-			logging.GetLogger().Errorf("Unable get stats from ethtool (%s): %s", attrs.Name, err.Error())
+			logging.GetLogger().Errorf("Unable get stats from ethtool (%s): %s", attrs.Name, err)
 		} else if index, ok := stats["peer_ifindex"]; ok {
 			metadata["PeerIfIndex"] = int64(index)
 		}
@@ -459,11 +447,15 @@ func (u *NetNsNetLinkProbe) addLinkToTopology(link netlink.Link) {
 		}
 	}
 
-	if (attrs.Flags & net.FlagUp) > 0 {
-		metadata["State"] = "UP"
-	} else {
-		metadata["State"] = "DOWN"
+	metadata["State"] = strings.ToUpper(attrs.OperState.String())
+
+	var flags []string
+	for i, name := range flagNames {
+		if attrs.RawFlags&(1<<uint(i)) != 0 {
+			flags = append(flags, name)
+		}
 	}
+	metadata["LinkFlags"] = flags
 
 	if link.Type() == "bond" {
 		metadata["BondMode"] = link.(*netlink.Bond).Mode.String()
@@ -505,51 +497,58 @@ func (u *NetNsNetLinkProbe) addLinkToTopology(link netlink.Link) {
 	u.handleIntfIsVeth(intf, link)
 }
 
-func (u *NetNsNetLinkProbe) getRoutingTable(link netlink.Link, table int) []RoutingTable {
-	routeTableList := make(map[int]RoutingTable)
+func (u *NetNsProbe) getRoutingTables(link netlink.Link, table int) *RoutingTables {
 	routeFilter := &netlink.Route{
 		LinkIndex: link.Attrs().Index,
 		Table:     table,
 	}
 	routeList, err := u.handle.RouteListFiltered(netlink.FAMILY_ALL, routeFilter, netlink.RT_FILTER_OIF|netlink.RT_FILTER_TABLE)
-	if err == nil && len(routeList) > 0 {
-		for _, route := range routeList {
-			var routeTable RoutingTable
-			if rt, ok := routeTableList[route.Table]; ok {
-				routeTable = rt
-			} else {
-				routeTable = RoutingTable{ID: int64(route.Table), Src: route.Src}
-			}
-
-			r := Route{Protocol: int64(route.Protocol)}
-			if route.Dst != nil {
-				r.Prefix = (*route.Dst).String()
-			}
-			var nh []NextHop
-			if len(route.MultiPath) > 0 {
-				for _, nexthop := range route.MultiPath {
-					var nhop = NextHop{IP: nexthop.Gw, Priority: int64(route.Priority)}
-					nh = append(nh, nhop)
-				}
-			} else {
-				var nhop = NextHop{IP: route.Gw, Priority: int64(route.Priority), IfIndex: int64(route.LinkIndex)}
-				nh = append(nh, nhop)
-			}
-			r.Nexthops = nh
-			routeTable.Routes = append(routeTable.Routes, r)
-			routeTableList[route.Table] = routeTable
-		}
-
-		rt := []RoutingTable{}
-		for _, r := range routeTableList {
-			rt = append(rt, r)
-		}
-		return rt
+	if err != nil {
+		logging.GetLogger().Errorf("Unable to retrieve routing table: %s", err)
+		return nil
 	}
-	return nil
+
+	if len(routeList) == 0 {
+		return nil
+	}
+
+	routingTableMap := make(map[int]*RoutingTable)
+	for _, r := range routeList {
+		routingTable, ok := routingTableMap[r.Table]
+		if !ok {
+			routingTable = &RoutingTable{ID: int64(r.Table), Src: r.Src}
+		}
+
+		protocol, prefix := int64(r.Protocol), net.IPNet{}
+		if r.Dst != nil {
+			prefix = *r.Dst
+		} else {
+			if len(r.Gw) == net.IPv4len {
+				prefix = IPv4DefaultRoute
+			} else {
+				prefix = IPv6DefaultRoute
+			}
+		}
+
+		route := routingTable.GetOrCreateRoute(protocol, prefix)
+		if len(r.MultiPath) > 0 {
+			for _, nh := range r.MultiPath {
+				route.GetOrCreateNextHop(nh.Gw, int64(nh.LinkIndex), int64(r.Priority))
+			}
+		} else {
+			route.GetOrCreateNextHop(r.Gw, int64(r.LinkIndex), int64(r.Priority))
+		}
+		routingTableMap[r.Table] = routingTable
+	}
+
+	var result RoutingTables
+	for _, r := range routingTableMap {
+		result = append(result, r)
+	}
+	return &result
 }
 
-func (u *NetNsNetLinkProbe) onLinkAdded(link netlink.Link) {
+func (u *NetNsProbe) onLinkAdded(link netlink.Link) {
 	if u.isRunning() == true {
 		// has been deleted
 		index := link.Attrs().Index
@@ -563,7 +562,7 @@ func (u *NetNsNetLinkProbe) onLinkAdded(link netlink.Link) {
 	}
 }
 
-func (u *NetNsNetLinkProbe) onLinkDeleted(link netlink.Link) {
+func (u *NetNsProbe) onLinkDeleted(link netlink.Link) {
 	index := int64(link.Attrs().Index)
 
 	u.Graph.Lock()
@@ -574,7 +573,9 @@ func (u *NetNsNetLinkProbe) onLinkDeleted(link netlink.Link) {
 	if intf != nil {
 		parents := u.Graph.LookupParents(intf, graph.Metadata{"Type": "bridge"}, nil)
 		for _, parent := range parents {
-			u.Graph.Unlink(parent, intf)
+			if err := u.Graph.Unlink(parent, intf); err != nil {
+				logging.GetLogger().Error(err)
+			}
 		}
 	}
 
@@ -586,9 +587,13 @@ func (u *NetNsNetLinkProbe) onLinkDeleted(link netlink.Link) {
 		uuid, _ := intf.GetFieldString("UUID")
 
 		if driver == "openvswitch" && uuid != "" {
-			u.Graph.Unlink(u.Root, intf)
+			err = u.Graph.Unlink(u.Root, intf)
 		} else {
-			u.Graph.DelNode(intf)
+			err = u.Graph.DelNode(intf)
+		}
+
+		if err != nil {
+			logging.GetLogger().Error(err)
 		}
 	}
 	u.Graph.Unlock()
@@ -609,7 +614,7 @@ func getFamilyKey(family int) string {
 	return ""
 }
 
-func (u *NetNsNetLinkProbe) onRouteChanged(index int64, rt []RoutingTable) {
+func (u *NetNsProbe) onRoutingTablesChanged(index int64, rts *RoutingTables) {
 	u.Graph.Lock()
 	defer u.Graph.Unlock()
 
@@ -618,15 +623,21 @@ func (u *NetNsNetLinkProbe) onRouteChanged(index int64, rt []RoutingTable) {
 		logging.GetLogger().Errorf("No interface with index %d to add a new Route", index)
 		return
 	}
-	_, err := intf.GetField("RoutingTable")
-	if rt == nil && err == nil {
-		u.Graph.DelMetadata(intf, "RoutingTable")
-	} else if rt != nil {
-		u.Graph.AddMetadata(intf, "RoutingTable", rt)
+	_, err := intf.GetField("RoutingTables")
+	if rts == nil && err == nil {
+		err = u.Graph.DelMetadata(intf, "RoutingTables")
+	} else if rts != nil {
+		err = u.Graph.AddMetadata(intf, "RoutingTables", rts)
+	} else {
+		err = nil
+	}
+
+	if err != nil {
+		logging.GetLogger().Error(err)
 	}
 }
 
-func (u *NetNsNetLinkProbe) onAddressAdded(addr netlink.Addr, family int, index int64) {
+func (u *NetNsProbe) onAddressAdded(addr netlink.Addr, family int, index int64) {
 	u.Graph.Lock()
 	defer u.Graph.Unlock()
 
@@ -651,10 +662,12 @@ func (u *NetNsNetLinkProbe) onAddressAdded(addr netlink.Addr, family int, index 
 		}
 	}
 
-	u.Graph.AddMetadata(intf, key, append(ips, addr.IPNet.String()))
+	if err := u.Graph.AddMetadata(intf, key, append(ips, addr.IPNet.String())); err != nil {
+		logging.GetLogger().Error(err)
+	}
 }
 
-func (u *NetNsNetLinkProbe) onAddressDeleted(addr netlink.Addr, family int, index int64) {
+func (u *NetNsProbe) onAddressDeleted(addr netlink.Addr, family int, index int64) {
 	u.Graph.Lock()
 	defer u.Graph.Unlock()
 
@@ -679,14 +692,18 @@ func (u *NetNsNetLinkProbe) onAddressDeleted(addr netlink.Addr, family int, inde
 		}
 
 		if len(ips) == 0 {
-			u.Graph.DelMetadata(intf, key)
+			err = u.Graph.DelMetadata(intf, key)
 		} else {
-			u.Graph.AddMetadata(intf, key, ips)
+			err = u.Graph.AddMetadata(intf, key, ips)
+		}
+
+		if err != nil {
+			logging.GetLogger().Error(err)
 		}
 	}
 }
 
-func (u *NetNsNetLinkProbe) initialize() {
+func (u *NetNsProbe) initialize() {
 	logging.GetLogger().Debugf("Initialize Netlink interfaces for %s", u.Root.ID)
 	links, err := u.handle.LinkList()
 	if err != nil {
@@ -704,7 +721,7 @@ func (u *NetNsNetLinkProbe) initialize() {
 	}
 }
 
-func (u *NetNsNetLinkProbe) getRoutingTables(m []byte) ([]RoutingTable, int, error) {
+func (u *NetNsProbe) parseRtMsg(m []byte) (*RoutingTables, int, error) {
 	msg := nl.DeserializeRtMsg(m)
 	attrs, err := nl.ParseRouteAttr(m[msg.Len():])
 	if err != nil {
@@ -725,7 +742,7 @@ func (u *NetNsNetLinkProbe) getRoutingTables(m []byte) ([]RoutingTable, int, err
 		return nil, linkIndex, err
 	}
 
-	return u.getRoutingTable(link, syscall.RTA_UNSPEC), linkIndex, err
+	return u.getRoutingTables(link, syscall.RTA_UNSPEC), linkIndex, err
 }
 
 func parseAddr(m []byte) (addr netlink.Addr, family, index int, err error) {
@@ -772,11 +789,11 @@ func parseAddr(m []byte) (addr netlink.Addr, family, index int, err error) {
 	return
 }
 
-func (u *NetNsNetLinkProbe) isRunning() bool {
+func (u *NetNsProbe) isRunning() bool {
 	return atomic.LoadInt64(&u.state) == common.RunningState
 }
 
-func (u *NetNsNetLinkProbe) cloneLinkNodes() map[string]*graph.Node {
+func (u *NetNsProbe) cloneLinkNodes() map[string]*graph.Node {
 	// do a copy of the original in order to avoid inter locks
 	// between graph lock and netlink lock while iterating
 	u.RLock()
@@ -789,7 +806,7 @@ func (u *NetNsNetLinkProbe) cloneLinkNodes() map[string]*graph.Node {
 	return links
 }
 
-func (u *NetNsNetLinkProbe) updateIntfMetric(now, last time.Time) {
+func (u *NetNsProbe) updateIntfMetric(now, last time.Time) {
 	for name, node := range u.cloneLinkNodes() {
 		if link, err := u.handle.LinkByName(name); err == nil {
 			currMetric := newInterfaceMetricsFromNetlink(link)
@@ -827,7 +844,7 @@ func (u *NetNsNetLinkProbe) updateIntfMetric(now, last time.Time) {
 	}
 }
 
-func (u *NetNsNetLinkProbe) updateIntfFeatures() {
+func (u *NetNsProbe) updateIntfFeatures() {
 	for name, node := range u.cloneLinkNodes() {
 		u.Graph.RLock()
 		driver, _ := node.GetFieldString("Driver")
@@ -844,17 +861,19 @@ func (u *NetNsNetLinkProbe) updateIntfFeatures() {
 
 		if len(features) > 0 {
 			u.Graph.Lock()
-			u.Graph.AddMetadata(node, "Features", features)
+			if err := u.Graph.AddMetadata(node, "Features", features); err != nil {
+				logging.GetLogger().Error(err)
+			}
 			u.Graph.Unlock()
 		}
 	}
 }
 
-func (u *NetNsNetLinkProbe) start(nlProbe *NetLinkProbe) {
+func (u *NetNsProbe) start(nlProbe *Probe) {
 	u.wg.Add(1)
 	defer u.wg.Done()
 
-	// wait for NetLinkProbe ready
+	// wait for Probe ready
 Ready:
 	for {
 		switch atomic.LoadInt64(&nlProbe.state) {
@@ -901,7 +920,7 @@ Ready:
 	}
 }
 
-func (u *NetNsNetLinkProbe) onMessageAvailable() {
+func (u *NetNsProbe) onMessageAvailable() {
 	msgs, err := u.socket.Receive()
 	if err != nil {
 		if errno, ok := err.(syscall.Errno); !ok || !errno.Temporary() {
@@ -943,17 +962,17 @@ func (u *NetNsNetLinkProbe) onMessageAvailable() {
 			}
 			u.onAddressDeleted(addr, family, int64(ifindex))
 		case syscall.RTM_NEWROUTE, syscall.RTM_DELROUTE:
-			rt, index, err := u.getRoutingTables(msg.Data)
+			rts, index, err := u.parseRtMsg(msg.Data)
 			if err != nil {
 				logging.GetLogger().Warningf("Failed to get Routes: %s", err)
 				continue
 			}
-			u.onRouteChanged(int64(index), rt)
+			u.onRoutingTablesChanged(int64(index), rts)
 		}
 	}
 }
 
-func (u *NetNsNetLinkProbe) closeFds() {
+func (u *NetNsProbe) closeFds() {
 	if u.handle != nil {
 		u.handle.Delete()
 	}
@@ -968,7 +987,7 @@ func (u *NetNsNetLinkProbe) closeFds() {
 	}
 }
 
-func (u *NetNsNetLinkProbe) stop() {
+func (u *NetNsProbe) stop() {
 	if atomic.CompareAndSwapInt64(&u.state, common.RunningState, common.StoppingState) {
 		u.quit <- true
 		u.wg.Wait()
@@ -976,8 +995,8 @@ func (u *NetNsNetLinkProbe) stop() {
 	u.closeFds()
 }
 
-func newNetNsNetLinkProbe(g *graph.Graph, root *graph.Node, nsPath string) (*NetNsNetLinkProbe, error) {
-	probe := &NetNsNetLinkProbe{
+func newNetNsProbe(g *graph.Graph, root *graph.Node, nsPath string) (*NetNsProbe, error) {
+	probe := &NetNsProbe{
 		Graph:                g,
 		Root:                 root,
 		NsPath:               nsPath,
@@ -989,7 +1008,7 @@ func newNetNsNetLinkProbe(g *graph.Graph, root *graph.Node, nsPath string) (*Net
 	var context *common.NetNSContext
 	var err error
 
-	errFnc := func(err error) (*NetNsNetLinkProbe, error) {
+	errFnc := func(err error) (*NetNsProbe, error) {
 		probe.closeFds()
 		context.Close()
 
@@ -1028,8 +1047,8 @@ func newNetNsNetLinkProbe(g *graph.Graph, root *graph.Node, nsPath string) (*Net
 }
 
 // Register a new network netlink/namespace probe in the graph
-func (u *NetLinkProbe) Register(nsPath string, root *graph.Node) (*NetNsNetLinkProbe, error) {
-	probe, err := newNetNsNetLinkProbe(u.Graph, root, nsPath)
+func (u *Probe) Register(nsPath string, root *graph.Node) (*NetNsProbe, error) {
+	probe, err := newNetNsProbe(u.Graph, root, nsPath)
 	if err != nil {
 		return nil, err
 	}
@@ -1037,7 +1056,7 @@ func (u *NetLinkProbe) Register(nsPath string, root *graph.Node) (*NetNsNetLinkP
 	event := syscall.EpollEvent{Events: syscall.EPOLLIN, Fd: int32(probe.epollFd)}
 	if err := syscall.EpollCtl(u.epollFd, syscall.EPOLL_CTL_ADD, probe.epollFd, &event); err != nil {
 		probe.closeFds()
-		return nil, fmt.Errorf("Failed to add fd to epoll events set for %s: %s", root.String(), err.Error())
+		return nil, fmt.Errorf("Failed to add fd to epoll events set for %s: %s", root.String(), err)
 	}
 
 	u.Lock()
@@ -1050,14 +1069,14 @@ func (u *NetLinkProbe) Register(nsPath string, root *graph.Node) (*NetNsNetLinkP
 }
 
 // Unregister a probe from a network namespace
-func (u *NetLinkProbe) Unregister(nsPath string) error {
+func (u *Probe) Unregister(nsPath string) error {
 	u.Lock()
 	defer u.Unlock()
 
 	for fd, probe := range u.probes {
 		if probe.NsPath == nsPath {
 			if err := syscall.EpollCtl(u.epollFd, syscall.EPOLL_CTL_DEL, int(fd), nil); err != nil {
-				return fmt.Errorf("Failed to del fd from epoll events set for %s: %s", probe.Root.ID, err.Error())
+				return fmt.Errorf("Failed to del fd from epoll events set for %s: %s", probe.Root.ID, err)
 			}
 			delete(u.probes, fd)
 
@@ -1069,7 +1088,7 @@ func (u *NetLinkProbe) Unregister(nsPath string) error {
 	return fmt.Errorf("failed to unregister, probe not found for %s", nsPath)
 }
 
-func (u *NetLinkProbe) start() {
+func (u *Probe) start() {
 	u.wg.Add(1)
 	defer u.wg.Done()
 
@@ -1100,12 +1119,14 @@ func (u *NetLinkProbe) start() {
 }
 
 // Start the probe
-func (u *NetLinkProbe) Start() {
+func (u *Probe) Start() {
+	u.Register("", u.hostNode)
+
 	go u.start()
 }
 
 // Stop the probe
-func (u *NetLinkProbe) Stop() {
+func (u *Probe) Stop() {
 	if atomic.CompareAndSwapInt64(&u.state, common.RunningState, common.StoppingState) {
 		u.wg.Wait()
 
@@ -1122,20 +1143,19 @@ func (u *NetLinkProbe) Stop() {
 	}
 }
 
-// NewNetLinkProbe creates a new netlink probe
-func NewNetLinkProbe(g *graph.Graph, n *graph.Node) (*NetLinkProbe, error) {
+// NewProbe creates a new netlink probe
+func NewProbe(g *graph.Graph, hostNode *graph.Node) (*Probe, error) {
 	epfd, err := syscall.EpollCreate1(0)
 	if err != nil {
 		return nil, fmt.Errorf("Failed to create epoll: %s", err)
 	}
 
-	nlProbe := &NetLinkProbe{
-		Graph:   g,
-		epollFd: epfd,
-		probes:  make(map[int32]*NetNsNetLinkProbe),
+	nlProbe := &Probe{
+		Graph:    g,
+		hostNode: hostNode,
+		epollFd:  epfd,
+		probes:   make(map[int32]*NetNsProbe),
 	}
-
-	nlProbe.Register("", n)
 
 	return nlProbe, nil
 }

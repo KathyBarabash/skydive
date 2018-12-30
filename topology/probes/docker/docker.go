@@ -39,25 +39,25 @@ import (
 
 	"github.com/skydive-project/skydive/common"
 	"github.com/skydive-project/skydive/config"
+	"github.com/skydive-project/skydive/graffiti/graph"
 	"github.com/skydive-project/skydive/logging"
 	"github.com/skydive-project/skydive/topology"
-	"github.com/skydive-project/skydive/topology/graph"
 	ns "github.com/skydive-project/skydive/topology/probes/netns"
 	sversion "github.com/skydive-project/skydive/version"
 )
 
-// DockerClientAPIVersion Client API version used
-const DockerClientAPIVersion = "1.18"
+// ClientAPIVersion Client API version used
+const ClientAPIVersion = "1.18"
 
 type containerInfo struct {
 	Pid  int
 	Node *graph.Node
 }
 
-// DockerProbe describes a Docker topology graph that enhance the graph
-type DockerProbe struct {
+// Probe describes a Docker topology graph that enhance the graph
+type Probe struct {
 	common.RWMutex
-	*ns.NetNSProbe
+	*ns.Probe
 	url          string
 	client       *client.Client
 	cancel       context.CancelFunc
@@ -68,11 +68,11 @@ type DockerProbe struct {
 	containerMap map[string]containerInfo
 }
 
-func (probe *DockerProbe) containerNamespace(pid int) string {
+func (probe *Probe) containerNamespace(pid int) string {
 	return fmt.Sprintf("/proc/%d/ns/net", pid)
 }
 
-func (probe *DockerProbe) registerContainer(id string) {
+func (probe *Probe) registerContainer(id string) {
 	probe.Lock()
 	defer probe.Unlock()
 
@@ -105,14 +105,16 @@ func (probe *DockerProbe) registerContainer(id string) {
 		}
 
 		probe.Graph.Lock()
-		probe.Graph.AddMetadata(n, "Manager", "docker")
+		if err := probe.Graph.AddMetadata(n, "Manager", "docker"); err != nil {
+			logging.GetLogger().Error(err)
+		}
 		probe.Graph.Unlock()
 	}
 
-	probe.Graph.Lock()
 	metadata := graph.Metadata{
-		"Type": "container",
-		"Name": info.Name[1:],
+		"Type":    "container",
+		"Name":    info.Name[1:],
+		"Manager": "docker",
 		"Docker": map[string]interface{}{
 			"ContainerID":   info.ID,
 			"ContainerName": info.Name,
@@ -124,9 +126,15 @@ func (probe *DockerProbe) registerContainer(id string) {
 		metadata["Docker"].(map[string]interface{})["Labels"] = common.NormalizeValue(info.Config.Labels)
 	}
 
-	containerNode := probe.Graph.NewNode(graph.GenID(), metadata)
+	probe.Graph.Lock()
+	defer probe.Graph.Unlock()
+
+	containerNode, err := probe.Graph.NewNode(graph.GenID(), metadata)
+	if err != nil {
+		logging.GetLogger().Error(err)
+		return
+	}
 	topology.AddOwnershipLink(probe.Graph, n, containerNode, nil)
-	probe.Graph.Unlock()
 
 	probe.containerMap[info.ID] = containerInfo{
 		Pid:  info.State.Pid,
@@ -134,7 +142,7 @@ func (probe *DockerProbe) registerContainer(id string) {
 	}
 }
 
-func (probe *DockerProbe) unregisterContainer(id string) {
+func (probe *Probe) unregisterContainer(id string) {
 	probe.Lock()
 	defer probe.Unlock()
 
@@ -144,7 +152,11 @@ func (probe *DockerProbe) unregisterContainer(id string) {
 	}
 
 	probe.Graph.Lock()
-	probe.Graph.DelNode(infos.Node)
+	if err := probe.Graph.DelNode(infos.Node); err != nil {
+		probe.Graph.Unlock()
+		logging.GetLogger().Error(err)
+		return
+	}
 	probe.Graph.Unlock()
 
 	namespace := probe.containerNamespace(infos.Pid)
@@ -154,7 +166,7 @@ func (probe *DockerProbe) unregisterContainer(id string) {
 	delete(probe.containerMap, id)
 }
 
-func (probe *DockerProbe) handleDockerEvent(event *events.Message) {
+func (probe *Probe) handleDockerEvent(event *events.Message) {
 	if event.Status == "start" {
 		probe.registerContainer(event.ID)
 	} else if event.Status == "die" {
@@ -162,12 +174,12 @@ func (probe *DockerProbe) handleDockerEvent(event *events.Message) {
 	}
 }
 
-func (probe *DockerProbe) connect() error {
+func (probe *Probe) connect() error {
 	var err error
 
 	logging.GetLogger().Debugf("Connecting to Docker daemon: %s", probe.url)
 	defaultHeaders := map[string]string{"User-Agent": fmt.Sprintf("skydive-agent-%s", sversion.Version)}
-	probe.client, err = client.NewClient(probe.url, DockerClientAPIVersion, nil, defaultHeaders)
+	probe.client, err = client.NewClient(probe.url, ClientAPIVersion, nil, defaultHeaders)
 	if err != nil {
 		logging.GetLogger().Errorf("Failed to create client to Docker daemon: %s", err)
 		return err
@@ -184,7 +196,7 @@ func (probe *DockerProbe) connect() error {
 	}
 	defer probe.hostNs.Close()
 
-	for id, _ := range probe.containerMap {
+	for id := range probe.containerMap {
 		probe.unregisterContainer(id)
 	}
 
@@ -234,7 +246,7 @@ func (probe *DockerProbe) connect() error {
 }
 
 // Start the probe
-func (probe *DockerProbe) Start() {
+func (probe *Probe) Start() {
 	if !atomic.CompareAndSwapInt64(&probe.state, common.StoppedState, common.RunningState) {
 		return
 	}
@@ -256,7 +268,7 @@ func (probe *DockerProbe) Start() {
 }
 
 // Stop the probe
-func (probe *DockerProbe) Stop() {
+func (probe *Probe) Stop() {
 	if !atomic.CompareAndSwapInt64(&probe.state, common.RunningState, common.StoppingState) {
 		return
 	}
@@ -269,10 +281,10 @@ func (probe *DockerProbe) Stop() {
 	atomic.StoreInt64(&probe.state, common.StoppedState)
 }
 
-// NewDockerProbe creates a new topology Docker probe
-func NewDockerProbe(nsProbe *ns.NetNSProbe, dockerURL string) (*DockerProbe, error) {
-	dockerProbe := &DockerProbe{
-		NetNSProbe:   nsProbe,
+// NewProbe creates a new topology Docker probe
+func NewProbe(nsProbe *ns.Probe, dockerURL string) (*Probe, error) {
+	Probe := &Probe{
+		Probe:        nsProbe,
 		url:          dockerURL,
 		containerMap: make(map[string]containerInfo),
 		state:        common.StoppedState,
@@ -283,5 +295,5 @@ func NewDockerProbe(nsProbe *ns.NetNSProbe, dockerURL string) (*DockerProbe, err
 		nsProbe.Watch(path)
 	}
 
-	return dockerProbe, nil
+	return Probe, nil
 }

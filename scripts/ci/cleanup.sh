@@ -32,6 +32,11 @@ function cleanup() {
   cleanup_items docker "docker_rm"
   cleanup_items lxd "lxc delete --force"
 
+  # cleanup podman/runc
+  podman stop -a
+  podman rm -fa
+  podman rmi -fa
+
   "${CURDIR}/../scale.sh" stop 10 10 10
 
   # clean elasticsearch
@@ -54,6 +59,7 @@ EOF
 
   virsh net-destroy vagrant0
   virsh net-destroy vagrant-libvirt
+  systemctl restart libvirtd
 
   rm -rf /tmp/skydive_agent* /tmp/skydive-etcd
 

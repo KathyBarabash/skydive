@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018 IBM, Inc.
+ * Copyright 2018 IBM Corp.
  *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -23,120 +23,84 @@
 package k8s
 
 import (
-	"fmt"
-
-	"github.com/skydive-project/skydive/filters"
+	"github.com/skydive-project/skydive/graffiti/graph"
 	"github.com/skydive-project/skydive/logging"
 	"github.com/skydive-project/skydive/probe"
-	"github.com/skydive-project/skydive/topology/graph"
+	"github.com/skydive-project/skydive/topology"
 )
 
-const clusterName = "cluster"
+// ClusterName is the name of the k8s cluster
+const ClusterName = "cluster"
 
-type clusterProbe struct {
-	graph.DefaultGraphListener
-	graph          *graph.Graph
-	clusterIndexer *graph.MetadataIndexer
-	objectIndexer  *graph.MetadataIndexer
+var clusterNode *graph.Node
+
+type clusterCache struct {
+	*graph.EventHandler
+	graph *graph.Graph
 }
 
-func newClusterLinkedObjectIndexer(g *graph.Graph) *graph.MetadataIndexer {
-	filter := filters.NewAndFilter(
-		filters.NewTermStringFilter("Manager", managerValue),
-		filters.NewOrFilter(
-			filters.NewTermStringFilter("Type", "namespace"),
-			filters.NewTermStringFilter("Type", "networkpolicy"),
-			filters.NewTermStringFilter("Type", "node"),
-			filters.NewTermStringFilter("Type", "persistentvolume"),
-			filters.NewTermStringFilter("Type", "persistentvolumeclaim"),
-		),
+func (c *clusterCache) addClusterNode() {
+	c.graph.Lock()
+	defer c.graph.Unlock()
+
+	m := graph.Metadata{"Name": ClusterName}
+
+	var err error
+	clusterNode, err = c.graph.NewNode(graph.GenID(), NewMetadata(Manager, "cluster", m, nil, ClusterName), "")
+	if err != nil {
+		logging.GetLogger().Error(err)
+		return
+	}
+	c.NotifyEvent(graph.NodeAdded, clusterNode)
+	logging.GetLogger().Debugf("Added cluster{Name: %s}", ClusterName)
+}
+
+func (c *clusterCache) Start() {
+}
+
+func (c *clusterCache) Stop() {
+}
+
+func newClusterProbe(clientset interface{}, g *graph.Graph) Subprobe {
+	c := &clusterCache{
+		EventHandler: graph.NewEventHandler(100),
+		graph:        g,
+	}
+	c.addClusterNode()
+	return c
+}
+
+type clusterLinker struct {
+	graph.DefaultLinker
+	*graph.ResourceLinker
+	g             *graph.Graph
+	objectIndexer *graph.MetadataIndexer
+}
+
+func (linker *clusterLinker) createEdge(cluster, object *graph.Node) *graph.Edge {
+	id := graph.GenID(string(cluster.ID), string(object.ID))
+	return linker.g.CreateEdge(id, cluster, object, topology.OwnershipMetadata(), graph.TimeUTC(), "")
+}
+
+// GetBALinks returns all the incoming links for a node
+func (linker *clusterLinker) GetBALinks(objectNode *graph.Node) (edges []*graph.Edge) {
+	edges = append(edges, linker.createEdge(clusterNode, objectNode))
+	return
+}
+
+func newClusterLinker(g *graph.Graph, manager string, types ...string) probe.Probe {
+	rl := graph.NewResourceLinker(
+		g,
+		nil,
+		ListSubprobes(manager, types...),
+		&clusterLinker{g: g},
+		topology.OwnershipMetadata(),
 	)
-	m := graph.NewGraphElementFilter(filter)
-	return graph.NewMetadataIndexer(g, m)
-}
 
-func newClusterIndexer(g *graph.Graph) *graph.MetadataIndexer {
-	filter := filters.NewAndFilter(
-		filters.NewTermStringFilter("Manager", managerValue),
-		filters.NewTermStringFilter("Type", "cluster"),
-		filters.NewNotNullFilter("Name"),
-	)
-	m := graph.NewGraphElementFilter(filter)
-	return graph.NewMetadataIndexer(g, m, "Name")
-}
-
-func dumpCluster(name string) string {
-	return fmt.Sprintf("cluster{'Name': %s}", name)
-}
-
-func (p *clusterProbe) newMetadata(name string) graph.Metadata {
-	return newMetadata("cluster", "", name, nil)
-}
-
-func (p *clusterProbe) linkObject(objNode, clusterNode *graph.Node) {
-	addOwnershipLink(p.graph, clusterNode, objNode)
-}
-
-func (p *clusterProbe) addNode(name string) {
-	p.graph.Lock()
-	defer p.graph.Unlock()
-
-	clusterNode := newNode(p.graph, graph.GenID(), p.newMetadata(name))
-	objNodes, _ := p.objectIndexer.Get()
-	for _, objNode := range objNodes {
-		p.linkObject(objNode, clusterNode)
+	linker := &Linker{
+		ResourceLinker: rl,
 	}
+	rl.AddEventListener(linker)
 
-	logging.GetLogger().Debugf("Added %s", dumpCluster(name))
-}
-
-func (p *clusterProbe) delNode(name string) {
-	p.graph.Lock()
-	defer p.graph.Unlock()
-
-	clusterNodes, _ := p.clusterIndexer.Get(name)
-	for _, clusterNode := range clusterNodes {
-		p.graph.DelNode(clusterNode)
-	}
-
-	logging.GetLogger().Debugf("Deleted %s", dumpCluster(name))
-}
-
-func (p *clusterProbe) OnNodeAdded(objNode *graph.Node) {
-	logging.GetLogger().Debugf("Got event on adding %s", dumpGraphNode(objNode))
-	clusterNodes, _ := p.clusterIndexer.Get(clusterName)
-	if len(clusterNodes) > 0 {
-		p.linkObject(objNode, clusterNodes[0])
-	}
-}
-
-func (p *clusterProbe) OnNodeUpdated(objNode *graph.Node) {
-	logging.GetLogger().Debugf("Got event on updating %s", dumpGraphNode(objNode))
-	clusterNodes, _ := p.clusterIndexer.Get(clusterName)
-	if len(clusterNodes) > 0 {
-		p.linkObject(objNode, clusterNodes[0])
-	}
-}
-
-func (p *clusterProbe) Start() {
-	p.clusterIndexer.Start()
-	p.objectIndexer.AddEventListener(p)
-	p.objectIndexer.Start()
-	p.addNode(clusterName)
-}
-
-func (p *clusterProbe) Stop() {
-	p.delNode(clusterName)
-	p.clusterIndexer.Stop()
-	p.objectIndexer.RemoveEventListener(p)
-	p.objectIndexer.Stop()
-}
-
-func newClusterProbe(g *graph.Graph) probe.Probe {
-	p := &clusterProbe{
-		graph:          g,
-		clusterIndexer: newClusterIndexer(g),
-		objectIndexer:  newClusterLinkedObjectIndexer(g),
-	}
-	return p
+	return linker
 }

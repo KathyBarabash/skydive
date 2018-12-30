@@ -15,30 +15,49 @@ Vue.component('item', {
 
   template: `
   <div class="form-group">
+    <div v-if="Type == 'string'" class="form-group">
+      <label :for="Name">{{Description}}</label>
+      <textarea:id="Name" v-model="formData[Name]"></textarea>
+    </div>
+    <div v-else-if="Type == 'date'" class="form-group">
     <label :for="Name">{{Description}}</label>
-    <textarea v-if="Type == 'string'" :id="Name" v-model="formData[Name]"></textarea>
-    <input v-else-if="Type == 'date'" type="date" :id="Name" v-model="formData[Name]" class="form-control input-sm">
-    <input v-else-if="Type == 'integer'" type="number" :id="Name" v-model="formData[Name]" class="form-control input-sm">
-    <input v-else-if="Type == 'boolean'" type="checkbox" :id="Name" v-model="formData[Name]" class="form-check-input">
-    <node-selector v-else-if="Type == 'node'" :id="Name" v-model="formData[Name]"></node-selector>
-    <template v-else-if="Type == 'choice'">
-      <select :id="Name" v-model="formData[Name]" class="form-control input-sm">
-        <option v-for="(option, index) in Values" :value="option.Value">{{ option.Value }} ({{ option.Description }})</option>
-      </select>
-    </template>
-    <template v-else-if="Type == 'group'">
-      <item v-for="i in item" v-bind="i" :key="i.Name"></item>
-    </template>
-  </div>`,
-
-  created: function() {
-    this.formData[this.Name] = this.Default
-  }
+      <input type="date" :id="Name" v-model="formData[Name]" class="form-control input-sm">
+    </div>
+    <div v-else-if="Type == 'integer'" class="form-group">
+      <label :for="Name">{{Description}}</label>
+      <input type="number" :id="Name" v-model="formData[Name]" class="form-control input-sm">
+    </div>
+    <div v-else-if="Type == 'boolean'" class="form-group">
+      <label class="form-check-label">\
+        <input :id="Name" v-model="formData[Name]" type="checkbox" class="form-check-input">\
+        {{Description}}\
+        <span class="checkmark"></span>\
+      </label>\
+    </div>
+    <div v-else-if="Type == 'node'" class="form-group">
+      <label :for="Name">{{Description}}</label>
+      <node-selector :id="Name" v-model="formData[Name]"></node-selector>
+    </div>
+    <div v-else-if="Type == 'choice'" class="form-group">
+      <label :for="Name">{{Description}}</label>
+      <template>
+        <select :id="Name" v-model="formData[Name]" class="form-control custom-select">
+          <option v-for="(option, index) in Values" :value="option.Value">{{ option.Value }} ({{ option.Description }})</option>
+        </select>
+      </template>
+    </div>
+    <div v-else-if="Type == 'group'" class="form-group">
+      <label :for="Name">{{Description}}</label>
+      <template>
+        <item v-for="i in item" v-bind="i" :key="i.Name"></item>
+      </template>
+    </div>
+  </div>`
 })
 
 Vue.component('workflow-params', {
   props: [
-      'workflow'
+    'workflow'
   ],
 
   data() {
@@ -49,18 +68,18 @@ Vue.component('workflow-params', {
   },
 
   provide() {
-  	return {
-        formData: this.formData
+    return {
+      formData: this.formData
     }
   },
 
   inject: [
-    'result'
+    'result', 'toggleResultDisplay'
   ],
 
   template: `
     <form v-if="workflow.Parameters" @submit.prevent="submit">
-      <h1>{{workflow.Name}}</h1>
+      <h1><span class="workflow-title">{{workflow.Name}}</span></h1>
       <item v-for="item in workflow.Parameters" v-bind="item" :key="item.Name"></item>
       <button type="submit" id="execute" class="btn btn-primary">Execute</button>\
     </form>
@@ -69,35 +88,36 @@ Vue.component('workflow-params', {
   methods: {
 
     submit: function() {
-      var self = this
-      var source = "(" + this.workflow.Source + ")"
-      var f = eval(source)
+      this.toggleResultDisplay(true);
+      var self = this;
+      var source = "(" + this.workflow.Source + ")";
+      var f = eval(source);
       if (typeof f !== "function") {
-        throw "Source is not a function"
+        throw "Source is not a function";
       }
-      var args = []
+      var args = [];
       for (var i in this.workflow.Parameters) {
-        var param = this.workflow.Parameters[i]
-        args.push(this.formData[param.Name])
+        var param = this.workflow.Parameters[i];
+        args.push(this.formData[param.Name]);
       }
-      var promise = f.apply({}, args)
+      var promise = f.apply({}, args);
       promise.then(function (result) {
-        self.result.value = result
+        self.result.value = result;
         if (typeof result == "object") {
           if (result.nodes && result.edges) {
-            var g = topologyComponent.graph
+            var g = topologyComponent.graph;
             for (var n in result.nodes) {
-              var node = result.nodes[n]
-              g.addNode(node.ID, node.Host, node.Metadata)
+              var node = result.nodes[n];
+              g.addNode(node.ID, node.Host, node.Metadata);
             }
             for (var e in result.edges) {
-              var edge = result.edges[e]
-              g.addEdge(edge.ID, edge.Host, edge.Metadata, g.nodes[edge.Parent], g.nodes[edge.Child])
+              var edge = result.edges[e];
+              g.addEdge(edge.ID, edge.Host, edge.Metadata, g.nodes[edge.Parent], g.nodes[edge.Child]);
             }
           }
         }
       }).catch(function (e) {
-        self.result.value = e.toString()
+        self.result.value = e.toString();
       })
     }
   }
@@ -112,21 +132,23 @@ Vue.component('workflow-call', {
       "result": {
         "value": null
       },
-      "workflows": {}
+      "workflows": {},
+      "display": false
     }
   },
 
   provide() {
-  	return {
-        result: this.result
+    return {
+      result: this.result,
+      toggleResultDisplay: this.toggleResultDisplay
     }
   },
 
   template: `
     <div class="form-group">
       <div class="form-group">
-        <label for="workflow">Workflow</label>
-        <select id="workflow" v-model="currentWorkflow" class="form-control input-sm">
+        <label for="workflow">Workflows</label>
+        <select id="workflow" v-model="currentWorkflow" class="form-control custom-select">
           <option selected :value="{}">Select a workflow</option>\
           <option v-for="(workflow, id) in workflows" :value="workflow">{{ workflow.Name }} ({{ workflow.Description }})</option>
         </select>
@@ -134,20 +156,22 @@ Vue.component('workflow-call', {
       <div class="form-group">
         <workflow-params :workflow="currentWorkflow"></workflow-params>
       </div>
-      <div class="form-group">
-        <form>
-          <label for="workflow-output" v-if="result.value">Output</label>
+      <div class="form-group" v-if="display">
+        <h1><span class="workflow-title">Result</span></h1>
+        <div class="form-group" v-if="result.value">
           <textarea readonly id="workflow-output" type="text" class="form-control input-sm" rows="5" v-model="result.value" v-if="result.value && (typeof result.value) != 'object'"></textarea>
           <object-detail v-else-if="typeof result.value == 'object'" id="workflow-output" :object="result.value"></object-detail>\
         </div>
-        </form>
+        <div class="form-group" v-else>
+          <i class="fa fa-circle-o-notch fa-spin fa-2x fa-fw"></i>
+        </div>
       </div>
     </div>
   `,
 
   watch: {
     'currentWorkflow': function () {
-      this.result.value = undefined
+      this.toggleResultDisplay(false);
     }
   },
 
@@ -156,6 +180,12 @@ Vue.component('workflow-call', {
     self.workflowAPI.list()
       .then(function(data) {
         self.workflows = data;
+
+        // setting default
+        for (var i in this.workflow.Parameters) {
+          var param = this.workflow.Parameters[i];
+          param.Values = param.Default;
+        }
       })
       .catch(function (e) {
         if (e.status === 405) { // not allowed
@@ -164,6 +194,12 @@ Vue.component('workflow-call', {
         self.$error({message: 'Error while listing workflows: ' + e.responseText});
         return e;
       });
-  }
+  },
 
+  methods: {
+    toggleResultDisplay: function(status) {
+      this.display = status;
+      this.result.value = undefined;
+    }
+  }
 })

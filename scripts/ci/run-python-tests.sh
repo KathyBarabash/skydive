@@ -13,7 +13,7 @@ make docker-image
 cd contrib/python
 
 echo "Python2 tests"
-virtualenv-2 venv2
+virtualenv -p python2 venv2
 source venv2/bin/activate
 
 pip install -r api/requirements.txt
@@ -27,7 +27,7 @@ deactivate
 
 
 echo "Python3 tests"
-virtualenv-3 venv3
+virtualenv -p python3 venv3
 source venv3/bin/activate
 
 pip install flake8
@@ -52,10 +52,13 @@ agent:
 
 analyzer:
   listen: 0.0.0.0:8082
+  auth:
+    api:
+      backend: basic
 
 auth:
-  type: basic
   basic:
+    type: basic
     file: /etc/skydive.htpasswd
 EOF
 PASSWD=$(mktemp /tmp/skydive.passwd.XXXXXX)
@@ -99,6 +102,11 @@ IP.2 = ::1
 EOF
 
 CERT_DIR=$(mktemp -d /tmp/skydive-ssl.XXXXXX)
+openssl genrsa -out $CERT_DIR/rootCA.key 4096
+chmod 400 $CERT_DIR/rootCA.key
+yes '' | openssl req -x509 -new -nodes -key $CERT_DIR/rootCA.key -days 365 -out $CERT_DIR/rootCA.crt
+chmod 444 $CERT_DIR/rootCA.crt
+
 openssl genrsa -out $CERT_DIR/analyzer.key 2048
 chmod 400 $CERT_DIR/analyzer.key
 yes '' | openssl req -new -key $CERT_DIR/analyzer.key -out $CERT_DIR/analyzer.csr -subj "/CN=analyzer" -config $CONF_SSL
@@ -107,9 +115,13 @@ chmod 444 $CERT_DIR/analyzer.crt
 
 CONF=$(mktemp /tmp/skydive.yml.XXXXXX)
 cat <<EOF > "$CONF"
+tls:
+  ca_cert: /etc/skydive.ca.crt
+  client_cert: /etc/skydive.analyzer.crt
+  client_key: /etc/skydive.analyzer.key
+  server_cert: /etc/skydive.analyzer.crt
+  server_key: /etc/skydive.analyzer.key
 agent:
-  X509_cert: /etc/skydive.analyzer.crt
-  X509_key: /etc/skydive.analyzer.key
   topology:
     probes:
       - ovsdb
@@ -117,11 +129,9 @@ agent:
 
 analyzer:
   listen: 0.0.0.0:8082
-  X509_cert: /etc/skydive.analyzer.crt
-  X509_key: /etc/skydive.analyzer.key
 EOF
 
-export SKYDIVE_PYTHON_TESTS_MAPFILE="$CONF:/etc/skydive.yml,$CERT_DIR/analyzer.crt:/etc/skydive.analyzer.crt,$CERT_DIR/analyzer.key:/etc/skydive.analyzer.key"
+export SKYDIVE_PYTHON_TESTS_MAPFILE="$CONF:/etc/skydive.yml,$CERT_DIR/rootCA.crt:/etc/skydive.ca.crt,$CERT_DIR/analyzer.crt:/etc/skydive.analyzer.crt,$CERT_DIR/analyzer.key:/etc/skydive.analyzer.key"
 export SKYDIVE_PYTHON_TESTS_TLS="True"
 python -m unittest discover tests
 

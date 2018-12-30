@@ -22,7 +22,7 @@
 
 package traversal
 
-import "github.com/skydive-project/skydive/topology/graph/traversal"
+import "github.com/skydive-project/skydive/graffiti/graph/traversal"
 
 const (
 	traversalFlowToken        traversal.Token = 1001
@@ -35,4 +35,5 @@ const (
 	traversalMetricsToken     traversal.Token = 1008
 	traversalSocketsToken     traversal.Token = 1009
 	traversalDescendantsToken traversal.Token = 1010
+	traversalNextHopToken     traversal.Token = 1011
 )

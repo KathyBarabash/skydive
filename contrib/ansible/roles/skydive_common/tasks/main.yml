@@ -6,7 +6,7 @@
   set_fact:
     analyzers: >-
       {% for i in groups['analyzers'] -%}
-        {%- if hostvars[i]['skydive_listen_ip'] is defined and not "0.0.0.0" -%}
+        {%- if hostvars[i]['skydive_listen_ip'] is defined and hostvars[i]['skydive_listen_ip'] != "0.0.0.0" -%}
           {{ hostvars[i]['skydive_listen_ip'] }}:{{ skydive_analyzer_port }}
         {%- elif skydive_nic is defined -%}
           {{ hostvars[i][skydive_nic].ipv4.address }}:{{ skydive_analyzer_port }}
@@ -16,12 +16,15 @@
         {%- if not loop.last -%},{%- endif -%}
       {%- endfor %}
   tags:
+    - config
     - tests
+
+- include: config.yml
+  tags:
+    - config
 
 - include: binary.yml
   when: skydive_deployment_mode == "binary"
 
 - include: package.yml
   when: skydive_deployment_mode == "package"
-
-- include: config.yml

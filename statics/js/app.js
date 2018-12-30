@@ -147,8 +147,6 @@ var routes = [
     }
   },
   { path: '/topology', component: TopologyComponent, props: (route) => ({ query: route.query }) },
-  { path: '/conversation', component: ConversationComponent },
-  { path: '/discovery', component: DiscoveryComponent },
   { path: '/preference', component: PreferenceComponent },
   { path: '/status', component: StatusComponent },
   { path: '*', redirect: '/topology' }
@@ -304,19 +302,14 @@ var app = new Vue({
       return value;
     },
 
-    enforce: function(subject, action) {
-      var authorized = false;
+    enforce: function(object, action) {
       var perms = this.$store.state.permissions;
       for (var perm in perms) {
-        if (perms[perm][1] === subject && perms[perm][2] === action) {
-          if (perms[perm][3] === "allow") {
-            authorized = true
-          } else if (perms[perm][3] === "deny") {
-            authorized = false
-          }
+        if (perms[perm].Object === object && perms[perm].Action === action) {
+          return perms[perm].Allowed;
         }
       }
-      return authorized;
+      return false;
     },
 
     setThemeFromConfig: function() {
@@ -326,10 +319,16 @@ var app = new Vue({
     setTheme: function(theme) {
       switch (theme) {
         case 'light':
+          $('body').addClass("light");
+          $('body').removeClass("dark");
+
           $("#navbar").removeClass("navbar-inverse");
           $("#navbar").addClass("navbar-light");
           break;
         default:
+          $('body').addClass("dark");
+          $('body').removeClass("light");
+
           theme = 'dark';
           $("#navbar").addClass("navbar-inverse");
           $("#navbar").removeClass("navbar-light");

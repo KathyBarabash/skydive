@@ -22,14 +22,18 @@ var nodeImgMap = setupFixedImages({
   "bridge": "bridge",
   "switch": "switch",
   "ovsbridge": "switch",
+  "libvirt": "vm",
   "netns": "ns",
   "veth": "veth",
   "bond": "port",
+  "default": "intf",
+  // k8s
   "cluster": "cluster",
   "container": "container",
   "cronjob": "cronjob",
   "daemonset": "daemonset",
   "deployment": "deployment",
+  "endpoints": "endpoints",
   "ingress": "ingress",
   "job": "job",
   "node": "host",
@@ -43,7 +47,13 @@ var nodeImgMap = setupFixedImages({
   "service": "service",
   "statefulset": "statefulset",
   "storageclass": "storageclass",
-  "default": "intf",
+  // istio
+  "destinationrule": "destinationrule",
+  "gateway": "gateway",
+  "quotaspec": "quotaspec",
+  "quotaspecbinding": "quotaspecbinding",
+  "serviceentry": "serviceentry",
+  "virtualservice": "virtualservice",
 });
 
 var managerImgMap = setupFixedImages({
@@ -51,4 +61,6 @@ var managerImgMap = setupFixedImages({
   "lxd": "lxd",
   "neutron": "openstack",
   "k8s": "k8s",
+  "istio": "istio",
+  "runc": "runc"
 });

@@ -27,8 +27,8 @@ import (
 
 	"github.com/skydive-project/skydive/common"
 	"github.com/skydive-project/skydive/filters"
-	"github.com/skydive-project/skydive/topology/graph"
-	"github.com/skydive-project/skydive/topology/graph/traversal"
+	"github.com/skydive-project/skydive/graffiti/graph"
+	"github.com/skydive-project/skydive/graffiti/graph/traversal"
 	"github.com/skydive-project/skydive/topology/probes/socketinfo"
 )
 
@@ -39,7 +39,7 @@ type SocketsTraversalExtension struct {
 
 // SocketsGremlinTraversalStep describes the Sockets gremlin traversal step
 type SocketsGremlinTraversalStep struct {
-	context traversal.GremlinTraversalContext
+	traversal.GremlinTraversalContext
 }
 
 // NewSocketsTraversalExtension returns a new graph traversal extension
@@ -62,7 +62,7 @@ func (e *SocketsTraversalExtension) ScanIdent(s string) (traversal.Token, bool) 
 func (e *SocketsTraversalExtension) ParseStep(t traversal.Token, p traversal.GremlinTraversalContext) (traversal.GremlinTraversalStep, error) {
 	switch t {
 	case e.SocketsToken:
-		return &SocketsGremlinTraversalStep{context: p}, nil
+		return &SocketsGremlinTraversalStep{GremlinTraversalContext: p}, nil
 	}
 	return nil, nil
 }
@@ -71,21 +71,21 @@ func (e *SocketsTraversalExtension) ParseStep(t traversal.Token, p traversal.Gre
 func (s *SocketsGremlinTraversalStep) Exec(last traversal.GraphTraversalStep) (traversal.GraphTraversalStep, error) {
 	switch tv := last.(type) {
 	case *traversal.GraphTraversalV:
-		return Sockets(tv), nil
+		return Sockets(s.StepContext, tv), nil
 	case *FlowTraversalStep:
-		return tv.Sockets(), nil
+		return tv.Sockets(s.StepContext), nil
 	}
 	return nil, traversal.ErrExecutionError
 }
 
 // Reduce flow step
-func (s *SocketsGremlinTraversalStep) Reduce(next traversal.GremlinTraversalStep) traversal.GremlinTraversalStep {
-	return next
+func (s *SocketsGremlinTraversalStep) Reduce(next traversal.GremlinTraversalStep) (traversal.GremlinTraversalStep, error) {
+	return next, nil
 }
 
 // Context sockets step
 func (s *SocketsGremlinTraversalStep) Context() *traversal.GremlinTraversalContext {
-	return &s.context
+	return &s.GremlinTraversalContext
 }
 
 // SocketsTraversalStep connections step
@@ -96,7 +96,7 @@ type SocketsTraversalStep struct {
 }
 
 // PropertyValues returns a flow field value
-func (s *SocketsTraversalStep) PropertyValues(keys ...interface{}) *traversal.GraphTraversalValue {
+func (s *SocketsTraversalStep) PropertyValues(ctx traversal.StepContext, keys ...interface{}) *traversal.GraphTraversalValue {
 	if s.error != nil {
 		return traversal.NewGraphTraversalValueFromError(s.error)
 	}
@@ -116,13 +116,12 @@ func (s *SocketsTraversalStep) PropertyValues(keys ...interface{}) *traversal.Gr
 	return traversal.NewGraphTraversalValue(s.GraphTraversal, values)
 }
 
-// Has step
-func (s *SocketsTraversalStep) Has(params ...interface{}) *SocketsTraversalStep {
+func (s *SocketsTraversalStep) has(filterOp filters.BoolFilterOp, ctx traversal.StepContext, params ...interface{}) *SocketsTraversalStep {
 	if s.error != nil {
 		return s
 	}
 
-	filter, err := paramsToFilter(params...)
+	filter, err := paramsToFilter(filterOp, params...)
 	if err != nil {
 		return &SocketsTraversalStep{error: err}
 	}
@@ -144,6 +143,16 @@ func (s *SocketsTraversalStep) Has(params ...interface{}) *SocketsTraversalStep 
 	}
 
 	return &SocketsTraversalStep{GraphTraversal: s.GraphTraversal, sockets: flowSockets}
+}
+
+// Has step
+func (s *SocketsTraversalStep) Has(ctx traversal.StepContext, params ...interface{}) *SocketsTraversalStep {
+	return s.has(filters.BoolFilterOp_AND, ctx, params...)
+}
+
+// HasEither step
+func (s *SocketsTraversalStep) HasEither(ctx traversal.StepContext, params ...interface{}) *SocketsTraversalStep {
+	return s.has(filters.BoolFilterOp_OR, ctx, params...)
 }
 
 // Values returns list of socket informations
@@ -180,7 +189,7 @@ func getSockets(n *graph.Node) (sockets []*socketinfo.ConnectionInfo) {
 }
 
 // NewSocketIndexer returns a new socket graph indexer
-func NewSocketIndexer(g *graph.Graph) *graph.GraphIndexer {
+func NewSocketIndexer(g *graph.Graph) *graph.Indexer {
 	hashNode := func(n *graph.Node) map[string]interface{} {
 		sockets := getSockets(n)
 		kv := make(map[string]interface{}, len(sockets))
@@ -190,8 +199,8 @@ func NewSocketIndexer(g *graph.Graph) *graph.GraphIndexer {
 		return kv
 	}
 
-	graphIndexer := graph.NewGraphIndexer(g, hashNode, true)
-	socketFilter := graph.NewGraphElementFilter(filters.NewNotNullFilter("Sockets"))
+	graphIndexer := graph.NewIndexer(g, g, hashNode, true)
+	socketFilter := graph.NewElementFilter(filters.NewNotNullFilter("Sockets"))
 	for _, node := range g.GetNodes(socketFilter) {
 		graphIndexer.OnNodeAdded(node)
 	}

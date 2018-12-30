@@ -27,22 +27,28 @@ import (
 
 	"github.com/skydive-project/skydive/common"
 	"github.com/skydive-project/skydive/filters"
-	shttp "github.com/skydive-project/skydive/http"
 	"github.com/skydive-project/skydive/logging"
 	"github.com/skydive-project/skydive/topology"
+	ws "github.com/skydive-project/skydive/websocket"
 )
 
-// TableClient describes a mechanism to Query a flow table via flowSet in JSON
-type TableClient struct {
-	WSStructServer *shttp.WSStructServer
+// TableClient describes a mechanism to query a flow table
+type TableClient interface {
+	LookupFlows(flowSearchQuery filters.SearchQuery) (*FlowSet, error)
+	LookupFlowsByNodes(hnmap topology.HostNodeTIDMap, flowSearchQuery filters.SearchQuery) (*FlowSet, error)
 }
 
-func (f *TableClient) lookupFlows(flowset chan *FlowSet, host string, flowSearchQuery filters.SearchQuery) {
+// WSTableClient implements a flow table client using WebSocket
+type WSTableClient struct {
+	structServer *ws.StructServer
+}
+
+func (f *WSTableClient) lookupFlows(flowset chan *FlowSet, host string, flowSearchQuery filters.SearchQuery) {
 	obj, _ := proto.Marshal(&flowSearchQuery)
 	tq := TableQuery{Type: "SearchQuery", Obj: obj}
-	msg := shttp.NewWSStructMessage(Namespace, "TableQuery", tq)
+	msg := ws.NewStructMessage(Namespace, "TableQuery", tq)
 
-	resp, err := f.WSStructServer.Request(host, msg, shttp.DefaultRequestTimeout)
+	resp, err := f.structServer.Request(host, msg, ws.DefaultRequestTimeout)
 	if err != nil {
 		logging.GetLogger().Errorf("Unable to send message to agent %s: %s", host, err.Error())
 		flowset <- NewFlowSet()
@@ -75,12 +81,12 @@ func (f *TableClient) lookupFlows(flowset chan *FlowSet, host string, flowSearch
 }
 
 // LookupFlows query flow table based on a filter search query
-func (f *TableClient) LookupFlows(flowSearchQuery filters.SearchQuery) (*FlowSet, error) {
-	speakers := f.WSStructServer.GetSpeakersByType(common.AgentService)
+func (f *WSTableClient) LookupFlows(flowSearchQuery filters.SearchQuery) (*FlowSet, error) {
+	speakers := f.structServer.GetSpeakersByType(common.AgentService)
 	ch := make(chan *FlowSet, len(speakers))
 
 	for _, c := range speakers {
-		go f.lookupFlows(ch, c.GetHost(), flowSearchQuery)
+		go f.lookupFlows(ch, c.GetRemoteHost(), flowSearchQuery)
 	}
 
 	flowset := NewFlowSet()
@@ -103,7 +109,7 @@ func (f *TableClient) LookupFlows(flowSearchQuery filters.SearchQuery) (*FlowSet
 }
 
 // LookupFlowsByNodes query flow table based on multiple nodes
-func (f *TableClient) LookupFlowsByNodes(hnmap topology.HostNodeTIDMap, flowSearchQuery filters.SearchQuery) (*FlowSet, error) {
+func (f *WSTableClient) LookupFlowsByNodes(hnmap topology.HostNodeTIDMap, flowSearchQuery filters.SearchQuery) (*FlowSet, error) {
 	ch := make(chan *FlowSet, len(hnmap))
 
 	// We conserve the original filter to reuse it for each host
@@ -132,7 +138,7 @@ func (f *TableClient) LookupFlowsByNodes(hnmap topology.HostNodeTIDMap, flowSear
 	return flowset, nil
 }
 
-// NewTableClient creates a new table client based on websocket
-func NewTableClient(w *shttp.WSStructServer) *TableClient {
-	return &TableClient{WSStructServer: w}
+// NewWSTableClient creates a new table client based on websocket
+func NewWSTableClient(w *ws.StructServer) *WSTableClient {
+	return &WSTableClient{structServer: w}
 }

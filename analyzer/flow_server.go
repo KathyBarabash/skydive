@@ -35,19 +35,19 @@ import (
 	"github.com/skydive-project/skydive/common"
 	"github.com/skydive-project/skydive/config"
 	"github.com/skydive-project/skydive/flow"
-	"github.com/skydive-project/skydive/flow/enhancers"
 	"github.com/skydive-project/skydive/flow/storage"
+	"github.com/skydive-project/skydive/graffiti/graph"
 	shttp "github.com/skydive-project/skydive/http"
 	"github.com/skydive-project/skydive/logging"
 	"github.com/skydive-project/skydive/probe"
-	"github.com/skydive-project/skydive/topology/graph"
+	ws "github.com/skydive-project/skydive/websocket"
 )
 
 const (
 	// FlowBulkInsertDefault maximum number of flows aggregated between two data store inserts
 	FlowBulkInsertDefault int = 100
 
-	// FlowBulkDeadlineDefault deadline of each bulk insert in second
+	// FlowBulkInsertDeadlineDefault deadline of each bulk insert in second
 	FlowBulkInsertDeadlineDefault int = 5
 
 	// FlowBulkMaxDelayDefault delay between two bulk
@@ -76,33 +76,34 @@ type FlowServerUDPConn struct {
 
 // FlowServerWebSocketConn describes a WebSocket flow server connection
 type FlowServerWebSocketConn struct {
-	shttp.DefaultWSSpeakerEventHandler
+	ws.DefaultSpeakerEventHandler
 	server                 *shttp.Server
 	ch                     chan *flow.Flow
 	timeOfLastLostFlowsLog time.Time
 	numOfLostFlows         int
 	maxFlowBufferSize      int
+	auth                   shttp.AuthenticationBackend
 }
 
-// FlowServer describes a flow server with pipeline enhancers mechanism
+// FlowServer describes a flow server
 type FlowServer struct {
-	storage                storage.Storage
-	enhancerPipeline       *flow.EnhancerPipeline
-	enhancerPipelineConfig *flow.EnhancerPipelineConfig
-	conn                   FlowServerConn
-	state                  int64
-	wgServer               sync.WaitGroup
-	bulkInsert             int
-	bulkInsertDeadline     time.Duration
-	ch                     chan *flow.Flow
-	quit                   chan struct{}
+	storage            storage.Storage
+	conn               FlowServerConn
+	state              int64
+	wgServer           sync.WaitGroup
+	bulkInsert         int
+	bulkInsertDeadline time.Duration
+	ch                 chan *flow.Flow
+	quit               chan struct{}
+	auth               shttp.AuthenticationBackend
+	subscriberEndpoint *FlowSubscriberEndpoint
 }
 
 // OnMessage event
-func (c *FlowServerWebSocketConn) OnMessage(client shttp.WSSpeaker, m shttp.WSMessage) {
+func (c *FlowServerWebSocketConn) OnMessage(client ws.Speaker, m ws.Message) {
 	f, err := flow.FromData(m.Bytes(client.GetClientProtocol()))
 	if err != nil {
-		logging.GetLogger().Errorf("Error while parsing flow: %s", err.Error())
+		logging.GetLogger().Errorf("Error while parsing flow: %s", err)
 		return
 	}
 	logging.GetLogger().Debugf("New flow from Websocket connection: %+v", f)
@@ -116,13 +117,14 @@ func (c *FlowServerWebSocketConn) OnMessage(client shttp.WSSpeaker, m shttp.WSMe
 		}
 		return
 	}
+
 	c.ch <- f
 }
 
 // Serve starts a WebSocket flow server
 func (c *FlowServerWebSocketConn) Serve(ch chan *flow.Flow, quit chan struct{}, wg *sync.WaitGroup) {
 	c.ch = ch
-	server := shttp.NewWSServer(c.server, "/ws/flow")
+	server := config.NewWSServer(c.server, "/ws/agent/flow", c.auth)
 	server.AddEventHandler(c)
 	go func() {
 		server.Start()
@@ -132,9 +134,9 @@ func (c *FlowServerWebSocketConn) Serve(ch chan *flow.Flow, quit chan struct{}, 
 }
 
 // NewFlowServerWebSocketConn returns a new WebSocket flow server
-func NewFlowServerWebSocketConn(server *shttp.Server) (*FlowServerWebSocketConn, error) {
+func NewFlowServerWebSocketConn(server *shttp.Server, auth shttp.AuthenticationBackend) (*FlowServerWebSocketConn, error) {
 	flowsMax := config.GetConfig().GetInt("analyzer.flow.max_buffer_size")
-	return &FlowServerWebSocketConn{server: server, maxFlowBufferSize: flowsMax}, nil
+	return &FlowServerWebSocketConn{server: server, maxFlowBufferSize: flowsMax, auth: auth}, nil
 }
 
 // Serve UDP connections
@@ -156,12 +158,12 @@ func (c *FlowServerUDPConn) Serve(ch chan *flow.Flow, quit chan struct{}, wg *sy
 							continue
 						}
 					}
-					logging.GetLogger().Errorf("Error while reading: %s", err.Error())
+					logging.GetLogger().Errorf("Error while reading: %s", err)
 				}
 
 				f, err := flow.FromData(data[0:n])
 				if err != nil {
-					logging.GetLogger().Errorf("Error while parsing flow: %s", err.Error())
+					logging.GetLogger().Errorf("Error while parsing flow: %s", err)
 					continue
 				}
 
@@ -201,10 +203,16 @@ func NewFlowServerUDPConn(addr string, port int) (*FlowServerUDPConn, error) {
 }
 
 func (s *FlowServer) storeFlows(flows []*flow.Flow) {
-	if s.storage != nil && len(flows) > 0 {
-		s.storage.StoreFlows(flows)
+	if len(flows) > 0 {
+		if s.storage != nil {
+			if err := s.storage.StoreFlows(flows); err != nil {
+				logging.GetLogger().Error(err)
+			} else {
+				logging.GetLogger().Debugf("%d flows stored", len(flows))
+			}
+		}
 
-		logging.GetLogger().Debugf("%d flows stored", len(flows))
+		s.subscriberEndpoint.SendFlows(flows)
 	}
 }
 
@@ -273,23 +281,16 @@ func (s *FlowServer) setupBulkConfigFromBackend() error {
 }
 
 // NewFlowServer creates a new flow server listening at address/port, based on configuration
-func NewFlowServer(s *shttp.Server, g *graph.Graph, store storage.Storage, probe *probe.ProbeBundle) (*FlowServer, error) {
-	pipeline := flow.NewEnhancerPipeline(enhancers.NewGraphFlowEnhancer(g))
-
-	// check that the neutron probe is loaded if so add the neutron flow enhancer
-	if probe.GetProbe("neutron") != nil {
-		pipeline.AddEnhancer(enhancers.NewNeutronFlowEnhancer(g))
-	}
-
-	var err error
+func NewFlowServer(s *shttp.Server, g *graph.Graph, store storage.Storage, endpoint *FlowSubscriberEndpoint, probe *probe.Bundle, auth shttp.AuthenticationBackend) (*FlowServer, error) {
 	var conn FlowServerConn
 	protocol := strings.ToLower(config.GetString("flow.protocol"))
 
+	var err error
 	switch protocol {
 	case "udp":
 		conn, err = NewFlowServerUDPConn(s.Addr, s.Port)
 	case "websocket":
-		conn, err = NewFlowServerWebSocketConn(s)
+		conn, err = NewFlowServerWebSocketConn(s, auth)
 	default:
 		err = fmt.Errorf("Invalid protocol %s", protocol)
 	}
@@ -299,11 +300,11 @@ func NewFlowServer(s *shttp.Server, g *graph.Graph, store storage.Storage, probe
 	}
 
 	fs := &FlowServer{
-		storage:                store,
-		enhancerPipeline:       pipeline,
-		enhancerPipelineConfig: flow.NewEnhancerPipelineConfig(),
-		conn: conn,
-		quit: make(chan struct{}, 2),
+		storage:            store,
+		conn:               conn,
+		quit:               make(chan struct{}, 2),
+		auth:               auth,
+		subscriberEndpoint: endpoint,
 	}
 	err = fs.setupBulkConfigFromBackend()
 	if err != nil {

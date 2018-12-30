@@ -23,100 +23,121 @@
 package k8s
 
 import (
-	"fmt"
+	"github.com/skydive-project/skydive/filters"
+	"github.com/skydive-project/skydive/graffiti/graph"
+	"github.com/skydive-project/skydive/probe"
 
-	"github.com/skydive-project/skydive/common"
-	"github.com/skydive-project/skydive/logging"
-	"github.com/skydive-project/skydive/topology"
-	"github.com/skydive-project/skydive/topology/graph"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 const (
-	managerValue = "k8s"
-	hostID       = ""
+	// Manager is the manager value for Kubernetes
+	Manager = "k8s"
+	// KubeKey is the metadata area for k8s specific fields
+	KubeKey = "K8s"
+	// ExtraKey is the metadata area for k8s extra fields
+	ExtraKey = "K8s.Extra"
 )
 
-const (
-	detailsField  = "K8s"
-	nodeNameField = detailsField + ".Spec.NodeName"
-)
+// MetadataField is generates full path of a k8s specific field
+func MetadataField(field string) string {
+	return KubeKey + "." + field
+}
 
-func newMetadata(ty, namespace, name string, details interface{}) graph.Metadata {
-	m := graph.Metadata{
-		"Manager":    managerValue,
-		"Type":       ty,
-		"Namespace":  namespace,
-		"Name":       name,
-		detailsField: common.NormalizeValue(details),
+// MetadataFields generates full path of a list of k8s specific fields
+func MetadataFields(fields ...string) []string {
+	kubeFields := make([]string, len(fields))
+	for i, field := range fields {
+		kubeFields[i] = MetadataField(field)
+	}
+	return kubeFields
+}
+
+// NewMetadataFields creates internal k8s node metadata struct
+func NewMetadataFields(meta *metav1.ObjectMeta) graph.Metadata {
+	m := graph.Metadata{}
+	if meta.Namespace != "" {
+		m["Namespace"] = meta.Namespace
+	}
+	m["Name"] = meta.Name
+	return m
+}
+
+// NewMetadata creates a k8s node base metadata struct
+func NewMetadata(manager, ty string, kubeMeta graph.Metadata, extra interface{}, name string) graph.Metadata {
+	m := graph.Metadata{}
+	m["Manager"] = manager
+	m["Type"] = ty
+	m["Name"] = name
+	m.SetFieldAndNormalize(KubeKey, map[string]interface{}(kubeMeta))
+	if extra != nil {
+		m.SetFieldAndNormalize(ExtraKey, extra)
 	}
 	return m
 }
 
-func addMetadata(g *graph.Graph, n *graph.Node, details interface{}) {
-	tr := g.StartMetadataTransaction(n)
-	tr.AddMetadata(detailsField, common.NormalizeValue(details))
-	tr.Commit()
-}
-
-func newEdgeMetadata() graph.Metadata {
+// NewEdgeMetadata creates a new edge metadata
+func NewEdgeMetadata(manager, name string) graph.Metadata {
 	m := graph.Metadata{
-		"Manager":      managerValue,
-		"RelationType": "association",
+		"Manager":      manager,
+		"RelationType": name,
 	}
 	return m
 }
 
-func dumpGraphLink(parent, child *graph.Node) string {
-	return fmt.Sprintf("%s -> %s", dumpGraphNode(parent), dumpGraphNode(child))
+func newTypesFilter(manager string, types ...string) *filters.Filter {
+	filtersArray := make([]*filters.Filter, len(types))
+	for i, ty := range types {
+		filtersArray[i] = filters.NewTermStringFilter("Type", ty)
+	}
+	return filters.NewAndFilter(
+		filters.NewTermStringFilter("Manager", manager),
+		filters.NewOrFilter(filtersArray...),
+	)
 }
 
-func addLink(g *graph.Graph, parent, child *graph.Node) *graph.Edge {
-	m := newEdgeMetadata()
-	if e := g.GetFirstLink(parent, child, m); e != nil {
-		logging.GetLogger().Debugf("Adding link: %s: exists - skipping", dumpGraphLink(parent, child))
-		return e
+func newObjectIndexerFromFilter(g *graph.Graph, h graph.ListenerHandler, filter *filters.Filter, indexes ...string) *graph.MetadataIndexer {
+	filtersArray := make([]*filters.Filter, len(indexes)+1)
+	filtersArray[0] = filter
+	for i, index := range indexes {
+		filtersArray[i+1] = filters.NewNotNullFilter(index)
+	}
+	m := graph.NewElementFilter(filters.NewAndFilter(filtersArray...))
+	return graph.NewMetadataIndexer(g, h, m, indexes...)
+}
+
+func newResourceLinker(g *graph.Graph, subprobes map[string]Subprobe, srcType string, srcAttrs []string, dstType string, dstAttrs []string, edgeMetadata graph.Metadata) probe.Probe {
+	srcCache := subprobes[srcType]
+	dstCache := subprobes[dstType]
+	if srcCache == nil || dstCache == nil {
+		return nil
 	}
 
-	logging.GetLogger().Debugf("Adding link: %s", dumpGraphLink(parent, child))
-	return g.Link(parent, child, m, hostID)
-}
+	srcIndexer := graph.NewMetadataIndexer(g, srcCache, graph.Metadata{"Type": srcType}, srcAttrs...)
+	srcIndexer.Start()
 
-func delLink(g *graph.Graph, parent, child *graph.Node) {
-	m := newEdgeMetadata()
-	if e := g.GetFirstLink(parent, child, m); e == nil {
-		logging.GetLogger().Debugf("Deleting link: %s: missing - skipping", dumpGraphLink(parent, child))
-		return
+	dstIndexer := graph.NewMetadataIndexer(g, dstCache, graph.Metadata{"Type": dstType}, dstAttrs...)
+	dstIndexer.Start()
+
+	ml := graph.NewMetadataIndexerLinker(g, srcIndexer, dstIndexer, edgeMetadata)
+
+	linker := &Linker{
+		ResourceLinker: ml.ResourceLinker,
 	}
-	logging.GetLogger().Debugf("Deleting link: %s", dumpGraphLink(parent, child))
-	g.Unlink(parent, child)
+	ml.AddEventListener(linker)
+
+	return linker
 }
 
-func addOwnershipLink(g *graph.Graph, parent, child *graph.Node) *graph.Edge {
-	m := graph.Metadata{
-		"Manager": managerValue,
+func objectToNode(g *graph.Graph, object metav1.Object) (node *graph.Node) {
+	return g.GetNode(graph.Identifier(object.GetUID()))
+}
+
+func objectsToNodes(g *graph.Graph, objects []metav1.Object) (nodes []*graph.Node) {
+	for _, obj := range objects {
+		if node := objectToNode(g, obj); node != nil {
+			nodes = append(nodes, node)
+		}
 	}
-	if e := topology.GetOwnershipLink(g, parent, child); e != nil {
-		return e
-	}
-	logging.GetLogger().Debugf("Adding ownership: %s", dumpGraphLink(parent, child))
-	return topology.AddOwnershipLink(g, parent, child, m, hostID)
-}
-
-func syncLink(g *graph.Graph, parent, child *graph.Node, toAdd bool) {
-	if !toAdd {
-		delLink(g, parent, child)
-	} else {
-		addLink(g, parent, child)
-	}
-}
-
-func newNode(g *graph.Graph, i graph.Identifier, m graph.Metadata) *graph.Node {
-	return g.NewNode(i, m, hostID)
-}
-
-func dumpGraphNode(n *graph.Node) string {
-	ty, _ := n.GetFieldString("Type")
-	namespace, _ := n.GetFieldString("Namespace")
-	name, _ := n.GetFieldString("Name")
-	return fmt.Sprintf("%s{Namespace: %s, Name: %s}", ty, namespace, name)
+	return
 }

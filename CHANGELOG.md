@@ -2,6 +2,73 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.21.0] - 2018-11-30
+### Added
+- LLDP topology probe for topology auto discovery
+- Libvirt probe
+- runC container probe
+- Introduce WebSocket endpoint to get flows notifications
+- Extra flow layers such as DHCP, VRRP and DNS
+- Add command line command to export/import topology
+- Gremlin:
+  - New HasEither step to generate a OR filter instead of AND
+  - NextHop step to compute the next hop using routing tables
+- Support for OpenFlow group tables
+
+### Changed
+- Wait for elasticsearch to be ready instead of failing
+- Refactored TLS configuration
+
+## [0.20.0] - 2018-10-08
+### Changed
+- Switch to gopacket master branch
+- Revamp Web UI
+- Remove user metadata API
+- Disable elasticsearch by default in devstack plugin
+- Bug fixes:
+  - Fix Limit for topology Gremlin steps
+  - Fix packets missed to due timeout when using afpacket
+  - Use Capture.ID instead of capture gremlin expression
+  - Fix IPv6 connection state when using eBPF
+  - Fix openflow rule modification
+
+## [0.19.1] - 2018-09-13
+### Added
+- Add node/edge rules API to register nodes and edges
+- Add Ansible library to create nodes and edges
+
+### Changed
+- Bug fixes:
+  - Fix WebSocket flow authentication
+  - Fix deployment on RHEL using Ansible
+  - Fix SElinux policy to connect to Keystone
+  - Change Docker base image to Ubuntu
+  - Add origin field in python api
+
+## [0.19.0] - 2018-08-08
+### Added
+- Gremlin:
+  - Add `descendants` to retrieve both parents and children
+  - Add `As` and `Select` steps to get the union of a set of nodes
+  - Allow queries on booleans
+- New JavaScript API
+  - Support for browsers, NPM or the Skydive embedded JS engine
+  - Convert command line shell to JavaScript
+- Add API to upload and execute workflows
+- Add support for Power architecture:
+  - Build Docker images
+  - Test architecture on our CI
+- Retrieve OpenContrail routing tables
+
+### Changed
+- Improved Elasticseach backend:
+  - Add support for rolling indices
+  - Bump minimal version to 5.5
+- Retrieve more Kubernetes metadata and create dedicated section on the Web UI for it
+- Performance improvements using `easyjson`
+- Allow using different authentication backends for API and for internal communications
+- TripleO: move to config-download mechanism
+
 ## [0.18.0] - 2018-06-18
 ### Added
 - Add `RBAC` mechanism

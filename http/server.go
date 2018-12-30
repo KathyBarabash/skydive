@@ -25,18 +25,9 @@ package http
 import (
 	"context"
 	"crypto/tls"
-	"encoding/base64"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"html/template"
-	"io/ioutil"
-	"mime"
 	"net"
 	"net/http"
-	"os"
-	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -46,14 +37,15 @@ import (
 	"github.com/gorilla/mux"
 
 	"github.com/skydive-project/skydive/common"
-	"github.com/skydive-project/skydive/config"
 	"github.com/skydive-project/skydive/logging"
 	"github.com/skydive-project/skydive/rbac"
-	"github.com/skydive-project/skydive/statics"
 )
 
+// PathPrefix describes the prefix of the path of an URL
 type PathPrefix string
 
+// Route describes an HTTP route with a name, a HTTP verb,
+// a path protected by an authentication backend
 type Route struct {
 	Name        string
 	Method      string
@@ -61,24 +53,7 @@ type Route struct {
 	HandlerFunc auth.AuthenticatedHandlerFunc
 }
 
-type ConnectionType int
-
-const (
-	// TCP connection
-	TCP ConnectionType = 1 + iota
-	// TLS secure connection
-	TLS
-
-	// ExtraAssetPrefix is used for extra assets
-	ExtraAssetPrefix = "/extra-statics"
-)
-
-type ExtraAsset struct {
-	Filename string
-	Ext      string
-	Content  []byte
-}
-
+// Server describes a HTTP server for a service that dispatches requests to routes
 type Server struct {
 	sync.RWMutex
 	http.Server
@@ -87,13 +62,9 @@ type Server struct {
 	Router      *mux.Router
 	Addr        string
 	Port        int
-	Auth        AuthenticationBackend
 	lock        sync.Mutex
 	listener    net.Listener
-	CnxType     ConnectionType
 	wg          sync.WaitGroup
-	extraAssets map[string]ExtraAsset
-	globalVars  map[string]interface{}
 }
 
 func copyRequestVars(old, new *http.Request) {
@@ -103,12 +74,20 @@ func copyRequestVars(old, new *http.Request) {
 	}
 }
 
-func (s *Server) RegisterRoutes(routes []Route) {
+// SetTLSHeader set TLS specific headers in the response
+func SetTLSHeader(w http.ResponseWriter, r *http.Request) {
+	if r.TLS != nil {
+		w.Header().Add("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
+	}
+}
+
+// RegisterRoutes registers a set of routes protected by an authentication backend
+func (s *Server) RegisterRoutes(routes []Route, auth AuthenticationBackend) {
 	for _, route := range routes {
 		r := s.Router.
 			Methods(route.Method).
 			Name(route.Name).
-			Handler(s.Auth.Wrap(route.HandlerFunc))
+			Handler(auth.Wrap(route.HandlerFunc))
 		switch p := route.Path.(type) {
 		case string:
 			r.Path(p)
@@ -118,35 +97,20 @@ func (s *Server) RegisterRoutes(routes []Route) {
 	}
 }
 
+// Listen starts listening for TCP requests
 func (s *Server) Listen() error {
 	listenAddrPort := fmt.Sprintf("%s:%d", s.Addr, s.Port)
-	socketType := "TCP"
 	ln, err := net.Listen("tcp", listenAddrPort)
 	if err != nil {
-		return fmt.Errorf("Failed to listen on %s:%d: %s", s.Addr, s.Port, err.Error())
+		return fmt.Errorf("Failed to listen on %s:%d: %s", s.Addr, s.Port, err)
 	}
+
 	s.listener = ln
-
-	if config.IsTLSenabled() == true {
-		socketType = "TLS"
-		certPEM := config.GetString("analyzer.X509_cert")
-		keyPEM := config.GetString("analyzer.X509_key")
-		agentCertPEM := config.GetString("agent.X509_cert")
-		tlsConfig, err := common.SetupTLSServerConfig(certPEM, keyPEM)
-		if err != nil {
-			return err
-		}
-		tlsConfig.ClientCAs, err = common.SetupTLSLoadCertificate(agentCertPEM)
-		if err != nil {
-			return err
-		}
-		s.listener = tls.NewListener(ln.(*net.TCPListener), tlsConfig)
-	}
-
-	logging.GetLogger().Infof("Listening on %s socket %s:%d", socketType, s.Addr, s.Port)
+	logging.GetLogger().Infof("Listening on socket %s:%d", s.Addr, s.Port)
 	return nil
 }
 
+// ListenAndServe starts listening and serving HTTP requests
 func (s *Server) ListenAndServe() {
 	if err := s.Listen(); err != nil {
 		logging.GetLogger().Critical(err)
@@ -155,231 +119,80 @@ func (s *Server) ListenAndServe() {
 	go s.Serve()
 }
 
+// Serve HTTP request
 func (s *Server) Serve() {
 	defer s.wg.Done()
 	s.wg.Add(1)
 
 	s.Handler = handlers.CompressHandler(s.Router)
-	if err := s.Server.Serve(s.listener); err != nil {
-		if err == http.ErrServerClosed {
-			return
-		}
-		logging.GetLogger().Errorf("Failed to Serve on %s:%d: %s", s.Addr, s.Port, err.Error())
+
+	var err error
+	if s.TLSConfig != nil {
+		err = s.Server.ServeTLS(s.listener, "", "")
+	} else {
+		err = s.Server.Serve(s.listener)
 	}
+
+	if err == http.ErrServerClosed {
+		return
+	}
+	logging.GetLogger().Errorf("Failed to serve on %s:%d: %s", s.Addr, s.Port, err)
 }
 
+// Unauthorized returns a 401 response
+func Unauthorized(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusUnauthorized)
+	w.Write([]byte("401 Unauthorized\n"))
+}
+
+// Stop the server
 func (s *Server) Stop() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := s.Server.Shutdown(ctx); err != nil {
-		logging.GetLogger().Error("Shutdown error :", err.Error())
+		logging.GetLogger().Error("Shutdown error :", err)
 	}
 	s.listener.Close()
 	s.wg.Wait()
 }
 
-func (s *Server) readStatics(upath string) (content []byte, err error) {
-	if asset, ok := s.extraAssets[upath]; ok {
-		logging.GetLogger().Debugf("Fetch disk asset: %s", upath)
-		content = asset.Content
-	} else if content, err = statics.Asset(upath); err != nil {
-		logging.GetLogger().Debugf("Fetch embedded asset: %s", upath)
-	}
-	return
-}
-
-func (s *Server) serveStatics(w http.ResponseWriter, r *http.Request) {
-	upath := r.URL.Path
-	if strings.HasPrefix(upath, "/") {
-		upath = strings.TrimPrefix(upath, "/")
-	}
-
-	content, err := s.readStatics(upath)
-
-	if err != nil {
-		logging.GetLogger().Errorf("Unable to find the asset %s", upath)
-		w.WriteHeader(http.StatusNotFound)
-		return
-	}
-
-	ext := filepath.Ext(upath)
-	ct := mime.TypeByExtension(ext)
-
-	setTLSHeader(w, r)
-	w.Header().Set("Content-Type", ct+"; charset=UTF-8")
-	w.WriteHeader(http.StatusOK)
-	w.Write(content)
-}
-
-func (s *Server) serveIndex(w http.ResponseWriter, r *http.Request) {
-	s.RLock()
-	defer s.RUnlock()
-
-	html, err := s.readStatics("statics/index.html")
-	if err != nil {
-		logging.GetLogger().Error("Unable to find the asset index.html")
-		w.WriteHeader(http.StatusNotFound)
-		return
-	}
-
-	data := struct {
-		ExtraAssets map[string]ExtraAsset
-		GlobalVars  interface{}
-		Permissions [][]string
-	}{
-		ExtraAssets: s.extraAssets,
-		GlobalVars:  s.globalVars,
-		Permissions: rbac.GetPermissionsForUser("admin"),
-	}
-
-	w.Header().Set("Content-Type", "text/html; charset=UTF-8")
-	w.WriteHeader(http.StatusOK)
-
-	setTLSHeader(w, r)
-	w.Header().Set("Content-Type", "text/html; charset=UTF-8")
-	w.WriteHeader(http.StatusOK)
-
-	tmpl := template.Must(template.New("index").Delims("<<", ">>").Parse(string(html)))
-	if err := tmpl.Execute(w, data); err != nil {
-		logging.GetLogger().Criticalf("Unable to execute index template: %s", err)
-	}
-}
-
-func (s *Server) serveLogin(w http.ResponseWriter, r *http.Request) {
-	setTLSHeader(w, r)
-	if r.Method == "POST" {
-		r.ParseForm()
-		loginForm, passwordForm := r.Form["username"], r.Form["password"]
-		if len(loginForm) != 0 && len(passwordForm) != 0 {
-			login, password := loginForm[0], passwordForm[0]
-			if token, err := s.Auth.Authenticate(login, password); err == nil {
-				if token != "" {
-					http.SetCookie(w, &http.Cookie{
-						Name:  "authtok",
-						Value: token,
-					})
-				}
-
-				jsonPerms, _ := json.Marshal(rbac.GetPermissionsForUser(login))
-				http.SetCookie(w, &http.Cookie{
-					Name:  "permissions",
-					Value: base64.StdEncoding.EncodeToString([]byte(jsonPerms)),
-				})
-
-				w.WriteHeader(http.StatusOK)
-			} else {
-				unauthorized(w, r)
-			}
-		} else {
-			unauthorized(w, r)
-		}
-	} else {
-		http.Redirect(w, r, "/", http.StatusFound)
-	}
-}
-
-func unauthorized(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusUnauthorized)
-	w.Write([]byte("401 Unauthorized\n"))
-}
-
-func (s *Server) HandleFunc(path string, f auth.AuthenticatedHandlerFunc) {
-	s.Router.HandleFunc(path, s.Auth.Wrap(f))
-}
-
-func (s *Server) loadExtraAssets(folder, prefix string) {
-	files := []string{}
-
-	err := filepath.Walk(folder, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
+// HandleFunc specifies the handler function and the authentication backend used for a given path
+func (s *Server) HandleFunc(path string, f auth.AuthenticatedHandlerFunc, authBackend AuthenticationBackend) {
+	postAuthHandler := func(w http.ResponseWriter, r *auth.AuthenticatedRequest) {
+		// re-add user to its group
+		if roles := rbac.GetUserRoles(r.Username); len(roles) == 0 {
+			rbac.AddRoleForUser(r.Username, authBackend.DefaultUserRole(r.Username))
 		}
 
-		if info.IsDir() {
-			return nil
-		}
+		// re-send the permissions
+		setPermissionsCookie(w, r.Username)
 
-		files = append(files, strings.TrimPrefix(path, folder))
-		return nil
+		f(w, r)
+	}
+
+	preAuthHandler := authBackend.Wrap(postAuthHandler)
+
+	s.Router.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
+		// set tls headers first
+		SetTLSHeader(w, r)
+
+		preAuthHandler(w, r)
 	})
-
-	if err != nil {
-		logging.GetLogger().Errorf("Unable to load extra assets from %s: %s", folder, err)
-		return
-	}
-
-	for _, file := range files {
-		path := filepath.Join(folder, file)
-
-		data, err := ioutil.ReadFile(path)
-		if err != nil {
-			logging.GetLogger().Errorf("Unable to load extra asset %s: %s", path, err)
-			return
-		}
-
-		ext := filepath.Ext(path)
-
-		key := strings.TrimPrefix(filepath.Join(prefix, file), "/")
-		logging.GetLogger().Debugf("Added extra static assert: %s", key)
-		s.extraAssets[key] = ExtraAsset{
-			Filename: filepath.Join(prefix, file),
-			Ext:      ext,
-			Content:  data,
-		}
-	}
 }
 
-func (s *Server) AddGlobalVar(key string, v interface{}) {
-	s.Lock()
-	s.globalVars[key] = v
-	s.Unlock()
-}
-
-func NewServer(host string, serviceType common.ServiceType, addr string, port int, auth AuthenticationBackend, assetsFolder string) *Server {
+// NewServer returns a new HTTP service for a service
+func NewServer(host string, serviceType common.ServiceType, addr string, port int, tlsConfig *tls.Config) *Server {
 	router := mux.NewRouter().StrictSlash(true)
 	router.Headers("X-Host-ID", host, "X-Service-Type", serviceType.String())
 
-	server := &Server{
+	return &Server{
+		Server: http.Server{
+			TLSConfig: tlsConfig,
+		},
 		Host:        host,
 		ServiceType: serviceType,
 		Router:      router,
 		Addr:        addr,
 		Port:        port,
-		Auth:        auth,
-		extraAssets: make(map[string]ExtraAsset),
-		globalVars:  make(map[string]interface{}),
 	}
-
-	if assetsFolder != "" {
-		server.loadExtraAssets(assetsFolder, ExtraAssetPrefix)
-	}
-
-	router.PathPrefix("/statics").HandlerFunc(server.serveStatics)
-	router.PathPrefix(ExtraAssetPrefix).HandlerFunc(server.serveStatics)
-	router.HandleFunc("/login", server.serveLogin)
-	router.PathPrefix("/topology").HandlerFunc(server.serveIndex)
-	router.PathPrefix("/conversation").HandlerFunc(server.serveIndex)
-	router.PathPrefix("/discovery").HandlerFunc(server.serveIndex)
-	router.PathPrefix("/preference").HandlerFunc(server.serveIndex)
-	router.PathPrefix("/status").HandlerFunc(server.serveIndex)
-	router.HandleFunc("/", server.serveIndex)
-
-	return server
-}
-
-func NewServerFromConfig(serviceType common.ServiceType) (*Server, error) {
-	auth, err := NewAuthenticationBackendFromConfig()
-	if err != nil {
-		return nil, err
-	}
-
-	sa, err := common.ServiceAddressFromString(config.GetString(serviceType.String() + ".listen"))
-	if err != nil {
-		return nil, errors.New("Configuration error: " + err.Error())
-	}
-
-	host := config.GetString("host_id")
-	assets := config.GetString("ui.extra_assets")
-
-	return NewServer(host, serviceType, sa.Addr, sa.Port, auth, assets), nil
 }

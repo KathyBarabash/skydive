@@ -23,105 +23,54 @@
 package rbac
 
 import (
-	"bufio"
-	"bytes"
-	"io"
-	"strconv"
-	"strings"
-
 	"github.com/casbin/casbin"
 	"github.com/casbin/casbin/model"
-	"github.com/casbin/casbin/persist"
 	etcd "github.com/coreos/etcd/client"
-
-	"github.com/skydive-project/skydive/config"
-	"github.com/skydive-project/skydive/statics"
 )
 
-var enforcer *casbin.Enforcer
-
-func loadSection(model model.Model, key string, sec string) {
-	getKey := func(i int) string {
-		if i == 0 {
-			return sec
-		}
-		return sec + strconv.Itoa(i)
-	}
-
-	entries := config.GetStringSlice("rbac.model." + key)
-	for i, entry := range entries {
-		model.AddDef(sec, getKey(i), entry)
-	}
+// Permission defines a permission
+type Permission struct {
+	Object  string
+	Action  string
+	Allowed bool
 }
 
-func loadPolicy(content []byte, model model.Model) error {
-	buf := bufio.NewReader(bytes.NewReader([]byte(content)))
-	for {
-		line, err := buf.ReadString('\n')
-		line = strings.TrimSpace(line)
-		persist.LoadPolicyLine(line, model)
-		if err != nil {
-			if err == io.EOF {
-				return nil
-			}
-			return err
-		}
-	}
-}
-
-func loadStaticPolicy(model model.Model) error {
-	content, err := statics.Asset("rbac/policy.csv")
-	if err != nil {
-		return err
-	}
-
-	return loadPolicy(content, model)
-}
-
-func loadConfigPolicy(model model.Model) {
-	policies := config.GetStringSlice("rbac.policy")
-	for _, line := range policies {
-		persist.LoadPolicyLine(line, model)
-	}
-}
+var enforcer *casbin.SyncedEnforcer
 
 // Init loads the model from the configuration file then the policies.
 // 3 policies are applied, in that order :
 // - the policy uploaded in etcd and shared by all analyzers
 // - a policy bundled into the binary
 // - a policy specified in the configuration file
-func Init(kapi etcd.KeysAPI) error {
-	model := model.Model{}
-	loadSection(model, "request_definition", "r")
-	loadSection(model, "policy_definition", "p")
-	loadSection(model, "policy_effect", "e")
-	loadSection(model, "matchers", "m")
-	loadSection(model, "role_definition", "g")
-
+func Init(model model.Model, kapi etcd.KeysAPI, loadPolicy func(model.Model) error) error {
 	etcdAdapter, err := NewEtcdAdapter(kapi)
 	if err != nil {
 		return err
 	}
 
-	casbinEnforcer := casbin.NewEnforcer()
+	casbinEnforcer := casbin.NewSyncedEnforcer()
 	casbinEnforcer.InitWithModelAndAdapter(model, etcdAdapter)
 
-	if err := loadStaticPolicy(model); err != nil {
-		return err
+	if loadPolicy != nil {
+		if err := loadPolicy(model); err != nil {
+			return err
+		}
 	}
-	loadConfigPolicy(model)
+	casbinEnforcer.BuildRoleLinks()
 
 	watcher := NewEtcdWatcher(kapi)
 
 	watcher.SetUpdateCallback(func(string) {
 		casbinEnforcer.LoadPolicy()
-		loadStaticPolicy(model)
-		loadConfigPolicy(model)
+		if loadPolicy != nil {
+			loadPolicy(model)
+		}
 		model.PrintPolicy()
 		casbinEnforcer.BuildRoleLinks()
 	})
 
 	enforcer = casbinEnforcer
+
 	return nil
 }
 
@@ -134,11 +83,47 @@ func Enforce(sub, obj, act string) bool {
 	return enforcer.Enforce(sub, obj, act)
 }
 
+// AddRoleForUser registers a role for a user
+func AddRoleForUser(user, role string) bool {
+	if enforcer == nil {
+		return false
+	}
+
+	return enforcer.AddRoleForUser(user, role)
+}
+
+// GetUserRoles returns the roles of a user
+func GetUserRoles(user string) []string {
+	if enforcer == nil {
+		return []string{}
+	}
+
+	return enforcer.GetRolesForUser(user)
+}
+
 // GetPermissionsForUser returns all the allow and deny permissions for a user
-func GetPermissionsForUser(user string) [][]string {
+func GetPermissionsForUser(user string) []Permission {
 	if enforcer == nil {
 		return nil
 	}
 
-	return enforcer.GetPermissionsForUser(user)
+	subjects := enforcer.GetRolesForUser(user)
+	subjects = append(subjects, user)
+
+	mperms := make(map[string]Permission)
+	for _, subject := range subjects {
+		for _, p := range enforcer.GetPermissionsForUser(subject) {
+			permission := Permission{Object: p[1], Action: p[2], Allowed: p[3] == "allow"}
+
+			key := permission.Object + permission.Action
+			mperms[key] = permission
+		}
+	}
+
+	var permissions []Permission
+	for _, permission := range mperms {
+		permissions = append(permissions, permission)
+	}
+
+	return permissions
 }

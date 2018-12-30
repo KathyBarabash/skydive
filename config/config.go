@@ -44,10 +44,19 @@ var ErrNoAnalyzerSpecified = errors.New("No analyzer specified in the configurat
 var (
 	cfg           *viper.Viper
 	relocationMap = map[string][]string{
-		"analyzer.flow.max_buffer_size": {"analyzer.storage.max_flow_buffer_size"},
-		"analyzer.topology.backend":     {"graph.backend"},
-		"analyzer.flow.backend":         {"analyzer.storage.backend"},
-		"agent.capture.stats_update":    {"agent.flow.stats_update"},
+		"agent.auth.api.backend":            {"auth.type"},
+		"agent.auth.cluster.password":       {"auth.analyzer_password"},
+		"agent.auth.cluster.username":       {"auth.analyzer_username"},
+		"agent.capture.stats_update":        {"agent.flow.stats_update"},
+		"analyzer.auth.api.backend":         {"auth.type"},
+		"analyzer.auth.cluster.backend":     {"auth.type"},
+		"analyzer.auth.cluster.password":    {"auth.analyzer_password"},
+		"analyzer.auth.cluster.username":    {"auth.analyzer_username"},
+		"analyzer.flow.backend":             {"analyzer.storage.backend"},
+		"analyzer.flow.max_buffer_size":     {"analyzer.storage.max_flow_buffer_size"},
+		"analyzer.topology.backend":         {"graph.backend"},
+		"analyzer.topology.k8s.config_file": {"k8s.config_file"},
+		"analyzer.topology.k8s.probes":      {"k8s.probes"},
 	}
 )
 
@@ -63,6 +72,7 @@ func init() {
 
 	cfg = viper.New()
 
+	cfg.SetDefault("agent.auth.api.backend", "noauth")
 	cfg.SetDefault("agent.capture.stats_update", 1)
 	cfg.SetDefault("agent.flow.probes", []string{"gopacket", "pcapsocket"})
 	cfg.SetDefault("agent.flow.pcapsocket.bind_address", "127.0.0.1")
@@ -70,6 +80,7 @@ func init() {
 	cfg.SetDefault("agent.flow.pcapsocket.max_port", 8132)
 	cfg.SetDefault("agent.listen", "127.0.0.1:8081")
 	cfg.SetDefault("agent.topology.probes", []string{"ovsdb"})
+	cfg.SetDefault("agent.topology.libvirt.url", "qemu:///system")
 	cfg.SetDefault("agent.topology.netlink.metrics_update", 30)
 	cfg.SetDefault("agent.topology.neutron.domain_name", "Default")
 	cfg.SetDefault("agent.topology.neutron.endpoint_type", "public")
@@ -77,19 +88,25 @@ func init() {
 	cfg.SetDefault("agent.topology.neutron.region_name", "RegionOne")
 	cfg.SetDefault("agent.topology.neutron.tenant_name", "service")
 	cfg.SetDefault("agent.topology.neutron.username", "neutron")
+	cfg.SetDefault("agent.topology.runc.run_path", []string{"/run/containerd/runc", "/run/runc"})
 	cfg.SetDefault("agent.topology.socketinfo.host_update", 10)
-	cfg.SetDefault("agent.X509_servername", "")
 
+	cfg.SetDefault("analyzer.auth.cluster.backend", "noauth")
+	cfg.SetDefault("analyzer.auth.api.backend", "noauth")
 	cfg.SetDefault("analyzer.flow.backend", "memory")
 	cfg.SetDefault("analyzer.flow.max_buffer_size", 100000)
 	cfg.SetDefault("analyzer.listen", "127.0.0.1:8082")
 	cfg.SetDefault("analyzer.replication.debug", false)
 	cfg.SetDefault("analyzer.topology.backend", "memory")
 	cfg.SetDefault("analyzer.topology.probes", []string{})
+	cfg.SetDefault("analyzer.topology.k8s.config_file", "/etc/skydive/kubeconfig")
+	cfg.SetDefault("analyzer.topology.istio.config_file", "/etc/skydive/kubeconfig")
 
+	cfg.SetDefault("auth.basic.type", "basic") // defined for backward compatibility
 	cfg.SetDefault("auth.keystone.tenant_name", "admin")
+	cfg.SetDefault("auth.keystone.type", "keystone") // defined for backward compatibility
 	cfg.SetDefault("auth.keystone.domain_name", "Default")
-	cfg.SetDefault("auth.type", "noauth")
+	cfg.SetDefault("auth.noauth.type", "noauth") // defined for backward compatibility
 
 	cfg.SetDefault("cache.expire", 300)
 	cfg.SetDefault("cache.cleanup", 30)
@@ -97,10 +114,11 @@ func init() {
 	cfg.SetDefault("docker.url", "unix:///var/run/docker.sock")
 	cfg.SetDefault("docker.netns.run_path", "/var/run/docker/netns")
 
+	cfg.SetDefault("etcd.client_timeout", 5)
 	cfg.SetDefault("etcd.data_dir", "/var/lib/skydive/etcd")
 	cfg.SetDefault("etcd.embedded", true)
-	cfg.SetDefault("etcd.name", host)
 	cfg.SetDefault("etcd.listen", fmt.Sprintf("127.0.0.1:%d", etcdDefaultPort))
+	cfg.SetDefault("etcd.name", host)
 
 	cfg.SetDefault("flow.expire", 600)
 	cfg.SetDefault("flow.update", 60)
@@ -111,12 +129,8 @@ func init() {
 	cfg.SetDefault("http.rest.debug", false)
 	cfg.SetDefault("http.ws.ping_delay", 2)
 	cfg.SetDefault("http.ws.pong_timeout", 5)
-	cfg.SetDefault("http.ws.bulk_maxmsgs", 100)
-	cfg.SetDefault("http.ws.bulk_maxdelay", 1)
 	cfg.SetDefault("http.ws.queue_size", 10000)
 	cfg.SetDefault("http.ws.enable_write_compression", true)
-
-	cfg.SetDefault("k8s.config_file", "/etc/skydive/kubeconfig")
 
 	cfg.SetDefault("logging.backends", []string{"stderr"})
 	cfg.SetDefault("logging.color", true)
@@ -127,7 +141,9 @@ func init() {
 
 	cfg.SetDefault("netns.run_path", "/var/run/netns")
 
+	cfg.SetDefault("opencontrail.host", "localhost")
 	cfg.SetDefault("opencontrail.mpls_udp_port", 51234)
+	cfg.SetDefault("opencontrail.port", 8085)
 
 	cfg.SetDefault("ovs.ovsdb", "unix:///var/run/openvswitch/db.sock")
 	cfg.SetDefault("ovs.oflow.enable", false)
@@ -142,18 +158,18 @@ func init() {
 	cfg.SetDefault("rbac.model.policy_effect", []string{"some(where (p_eft == allow)) && !some(where (p_eft == deny))"})
 	cfg.SetDefault("rbac.model.matchers", []string{"g(r.sub, p.sub) && r.obj == p.obj && r.act == p.act"})
 
-	cfg.SetDefault("storage.elasticsearch.driver", "elasticsearch")
-	cfg.SetDefault("storage.elasticsearch.host", "127.0.0.1:9200")
-	cfg.SetDefault("storage.elasticsearch.bulk_maxdelay", 5)
-	cfg.SetDefault("storage.elasticsearch.index_age_limit", 0)
-	cfg.SetDefault("storage.elasticsearch.index_entries_limit", 0)
-	cfg.SetDefault("storage.elasticsearch.indices_to_keep", 0)
-	cfg.SetDefault("storage.memory.driver", "memory")
-	cfg.SetDefault("storage.orientdb.driver", "orientdb")
-	cfg.SetDefault("storage.orientdb.addr", "http://localhost:2480")
-	cfg.SetDefault("storage.orientdb.database", "Skydive")
-	cfg.SetDefault("storage.orientdb.username", "root")
-	cfg.SetDefault("storage.orientdb.password", "root")
+	cfg.SetDefault("storage.elasticsearch.driver", "elasticsearch")  // defined for backward compatibility and to set defaults
+	cfg.SetDefault("storage.elasticsearch.host", "127.0.0.1:9200")   // defined for backward compatibility and to set defaults
+	cfg.SetDefault("storage.elasticsearch.bulk_maxdelay", 5)         // defined for backward compatibility and to set defaults
+	cfg.SetDefault("storage.elasticsearch.index_age_limit", 0)       // defined for backward compatibility and to set defaults
+	cfg.SetDefault("storage.elasticsearch.index_entries_limit", 0)   // defined for backward compatibility and to set defaults
+	cfg.SetDefault("storage.elasticsearch.indices_to_keep", 0)       // defined for backward compatibility and to set defaults
+	cfg.SetDefault("storage.memory.driver", "memory")                // defined for backward compatibility and to set defaults
+	cfg.SetDefault("storage.orientdb.driver", "orientdb")            // defined for backward compatibility and to set defaults
+	cfg.SetDefault("storage.orientdb.addr", "http://localhost:2480") // defined for backward compatibility and to set defaults
+	cfg.SetDefault("storage.orientdb.database", "Skydive")           // defined for backward compatibility and to set defaults
+	cfg.SetDefault("storage.orientdb.username", "root")              // defined for backward compatibility and to set defaults
+	cfg.SetDefault("storage.orientdb.password", "root")              // defined for backward compatibility and to set defaults
 
 	cfg.SetDefault("ui", map[string]interface{}{})
 
@@ -180,14 +196,6 @@ func checkPositiveInt(key string) error {
 	return nil
 }
 
-func checkStrictRangeFloat(key string, min, max float64) error {
-	if value := cfg.GetFloat64(key); value <= min || value > max {
-		return fmt.Errorf("invalid value for %s (%f)", key, value)
-	}
-
-	return nil
-}
-
 func checkConfig() error {
 	if err := checkStrictPositiveInt("flow.expire"); err != nil {
 		return err
@@ -204,17 +212,8 @@ func checkConfig() error {
 	return checkPositiveInt("etcd.max_snap_files")
 }
 
-func checkViperSupportedExts(ext string) bool {
-	for _, e := range viper.SupportedExts {
-		if e == ext {
-			return true
-		}
-	}
-	return false
-}
-
 func setStorageDefaults() {
-	for key, _ := range cfg.GetStringMap("storage") {
+	for key := range cfg.GetStringMap("storage") {
 		if key == "elasticsearch" || key == "orientdb" || key == "memory" {
 			continue
 		}
@@ -278,7 +277,7 @@ func GetConfig() *viper.Viper {
 	return cfg
 }
 
-// SetDefault set default configuration key the value
+// SetDefault set the default configuration value for a key
 func SetDefault(key string, value interface{}) {
 	cfg.SetDefault(key, value)
 }
@@ -338,17 +337,30 @@ func GetEtcdServerAddrs() []string {
 	return []string{fmt.Sprintf("http://localhost:%d", port)}
 }
 
-// IsTLSenabled returns true is the analyzer certificates are set
-func IsTLSenabled() bool {
-	certPEM := GetString("analyzer.X509_cert")
-	keyPEM := GetString("analyzer.X509_key")
-	if len(certPEM) > 0 && len(keyPEM) > 0 {
+// IsTLSEnabled returns true is the client / server certificates are set
+func IsTLSEnabled() bool {
+	client := GetString("tls.client_cert")
+	clientKey := GetString("tls.client_key")
+	server := GetString("tls.server_cert")
+	serverKey := GetString("tls.server_key")
+	ca := GetString("tls.ca_cert")
+
+	if len(client) > 0 &&
+		len(clientKey) > 0 &&
+		len(server) > 0 &&
+		len(serverKey) > 0 &&
+		len(ca) > 0 {
 		return true
 	}
+
 	return false
 }
 
 func realKey(key string) string {
+	if cfg.IsSet(key) {
+		return key
+	}
+
 	// check is there is a deprecated key that can be used
 	depKeys, found := relocationMap[key]
 	if !found {
@@ -414,7 +426,7 @@ func BindPFlag(key string, flag *pflag.Flag) error {
 func GetURL(protocol string, addr string, port int, path string) *url.URL {
 	u, _ := url.Parse(fmt.Sprintf("%s://%s:%d%s", protocol, addr, port, path))
 
-	if (protocol == "http" || protocol == "ws") && IsTLSenabled() == true {
+	if (protocol == "http" || protocol == "ws") && IsTLSEnabled() == true {
 		u.Scheme += "s"
 	}
 
